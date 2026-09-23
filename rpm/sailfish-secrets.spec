@@ -175,6 +175,8 @@ Requires:         libsailfishsecrets = %{version}-%{release}
 Requires:         systemd
 %{?systemd_requires}
 Requires:         mapplauncherd
+Requires:         mapplauncherd-cgroup
+Requires(post):   mapplauncherd-cgroup
 Requires:         libsailfishcrypto = %{version}-%{release}
 Requires:         qt5-plugin-sqldriver-sqlcipher
 Requires:         nemo-qml-plugin-systemsettings
@@ -306,6 +308,8 @@ ln -s ../sailfish-secretsd.service %{buildroot}%{_userunitdir}/user-session.targ
 %postun -n libsailfishcryptoplugin -p /sbin/ldconfig
 
 %post -n %{secretsdaemon}
+systemctl daemon-reload || :
+systemctl start booster-cgroup-mount.service || :
 systemctl-user daemon-reload || :
 systemctl-user reload-or-try-restart sailfish-secretsd || :
 
@@ -333,6 +337,7 @@ systemctl daemon-reload || :
 %files -n libsailfishsecrets-tests
 /opt/tests/Sailfish/Secrets/authentication-client
 /opt/tests/Sailfish/Secrets/tst_secrets
+/opt/tests/Sailfish/Secrets/tst_freshauth
 /opt/tests/Sailfish/Secrets/tst_dataprotection
 /opt/tests/Sailfish/Secrets/tst_keymintdevicelock
 /opt/tests/Sailfish/Secrets/tst_masterkey
@@ -432,6 +437,7 @@ systemctl daemon-reload || :
 %files -n %{secretsdaemon}-secretsplugin-common
 %{_libdir}/Sailfish/Secrets/libsailfishsecrets-inappauth.so
 %{_libdir}/Sailfish/Secrets/libsailfishsecrets-passwordagentauth.so
+%{_libdir}/Sailfish/Secrets/libsailfishsecrets-deviceauth.so
 %{_libdir}/Sailfish/Secrets/libsailfishsecrets-sqlcipher.so
 %{_datadir}/polkit-1/actions/org.sailfishos.secrets.policy
 
