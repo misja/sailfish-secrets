@@ -13,6 +13,7 @@ class tst_keymintbinderclient : public QObject
     Q_OBJECT
 
 private slots:
+    void capabilityPayloadIsStrict();
     void authSetRoundTripAndPolicy();
     void authenticationIdentityPolicy();
     void opaqueKeyAndEnvelopeRoundTrip();
@@ -21,7 +22,33 @@ private slots:
     void hidlNullChildEncoding();
     void hidlKeymasterSmoke_data();
     void hidlKeymasterSmoke();
+    void attestationFailsClosed();
+    void legacyCertificateValidity();
 };
+
+void tst_keymintbinderclient::capabilityPayloadIsStrict()
+{
+    const qint32 supportedLevels[] = {
+        SecurityLevelSoftware,
+        SecurityLevelTrustedEnvironment,
+        SecurityLevelStrongBox
+    };
+    for (qint32 securityLevel : supportedLevels) {
+        const QByteArray response = serializeCapabilitiesResponse(securityLevel);
+        QCOMPARE(response.size(), 8);
+        Cursor cursor(response);
+        quint32 version = 0;
+        quint32 parsedSecurityLevel = 100;
+        QVERIFY(cursor.take(&version));
+        QVERIFY(cursor.take(&parsedSecurityLevel));
+        QVERIFY(cursor.atEnd());
+        QCOMPARE(version, ProtocolVersion);
+        QCOMPARE(parsedSecurityLevel, quint32(securityLevel));
+    }
+
+    QVERIFY(serializeCapabilitiesResponse(-1).isEmpty());
+    QVERIFY(serializeCapabilitiesResponse(100).isEmpty());
+}
 
 void tst_keymintbinderclient::authSetRoundTripAndPolicy()
 {
@@ -45,6 +72,13 @@ void tst_keymintbinderclient::authSetRoundTripAndPolicy()
     QCOMPARE(parsed.at(3).valueTag, qint32(ValueBlob));
     QCOMPARE(parsed.at(3).blob, QByteArray("aad"));
 
+    QVERIFY(policyMatchesIdentity(parsed, secureUserId, 0));
+    QVERIFY(!policyMatchesIdentity(parsed, secureUserId + 1, 0));
+
+    QVector<Parameter> noAuthentication;
+    noAuthentication << scalarParameter(TagNoAuthRequired, 1);
+    QVERIFY(policyMatchesIdentity(noAuthentication, secureUserId + 1, 0));
+
     QByteArray truncated = serialized;
     truncated.chop(1);
     QVERIFY(!parseAuthSet(truncated, &parsed));
@@ -65,6 +99,34 @@ void tst_keymintbinderclient::authenticationIdentityPolicy()
     const quint64 secureUserId = Q_UINT64_C(0x1020304050607080);
     const quint64 fingerprintAuthenticatorId
             = Q_UINT64_C(0x2122232425262728);
+
+    QVector<Parameter> biometric;
+    biometric << scalarParameter(TagUserSecureId,
+                                 fingerprintAuthenticatorId)
+              << scalarParameter(TagUserAuthType,
+                                 AuthenticatorFingerprint);
+    QVERIFY(policyMatchesIdentity(biometric, secureUserId,
+                                  fingerprintAuthenticatorId));
+    QVERIFY(!policyMatchesIdentity(biometric, secureUserId,
+                                   fingerprintAuthenticatorId + 1));
+
+    QVector<Parameter> wrongType = biometric;
+    wrongType[1] = scalarParameter(TagUserAuthType, AuthenticatorPassword);
+    QVERIFY(!policyMatchesIdentity(wrongType, secureUserId,
+                                   fingerprintAuthenticatorId));
+
+    QVector<Parameter> mixed = biometric;
+    mixed << scalarParameter(TagUserSecureId,
+                             fingerprintAuthenticatorId + 1);
+    QVERIFY(!policyMatchesIdentity(mixed, secureUserId,
+                                   fingerprintAuthenticatorId));
+
+    QVector<Parameter> rootFingerprint;
+    rootFingerprint << scalarParameter(TagUserSecureId, secureUserId)
+                    << scalarParameter(TagUserAuthType,
+                                       AuthenticatorFingerprint);
+    QVERIFY(policyMatchesIdentity(rootFingerprint, secureUserId,
+                                  fingerprintAuthenticatorId));
 
     HardwareAuthToken token;
     token.present = true;
@@ -183,6 +245,115 @@ void tst_keymintbinderclient::hardwareAuthTokenParsing()
                                 reinterpret_cast<const char *>(&zero), sizeof(zero));
     QVERIFY(!parseMasterHardwareAuthToken(zeroTimestampMaster, &parsedMaster));
 
+    QByteArray appToken;
+    appendLittleEndian(&appToken, quint32(1));
+    appendLittleEndian(&appToken, quint32(1));
+    appendLittleEndian(&appToken, challenge);
+    appendLittleEndian(&appToken, secureUserId);
+    appendLittleEndian(&appToken, authenticatorId);
+    appendLittleEndian(&appToken, quint32(2));
+    appendLittleEndian(&appToken, timestamp);
+    appendBlob(&appToken, mac);
+
+    Cursor cursor(appToken);
+    HardwareAuthToken parsedApp;
+    QVERIFY(parseAppHardwareAuthToken(&cursor, &parsedApp));
+    QVERIFY(cursor.atEnd());
+    QVERIFY(parsedApp.present);
+    QCOMPARE(parsedApp.authenticatorType, quint32(2));
+    QCOMPARE(parsedApp.mac, mac);
+
+    QByteArray zeroMacApp = appToken;
+    zeroMacApp.replace(zeroMacApp.size() - 32, 32, QByteArray(32, '\0'));
+    Cursor zeroMacCursor(zeroMacApp);
+    QVERIFY(parseAppHardwareAuthToken(&zeroMacCursor, &parsedApp));
+    QVERIFY(zeroMacCursor.atEnd());
+    QCOMPARE(parsedApp.mac, QByteArray(32, '\0'));
+
+    QByteArray absentToken;
+    appendLittleEndian(&absentToken, quint32(0));
+    Cursor absentCursor(absentToken);
+    QVERIFY(parseAppHardwareAuthToken(&absentCursor, &parsedApp));
+    QVERIFY(absentCursor.atEnd());
+    QVERIFY(!parsedApp.present);
+
+    QVERIFY(emptyVerificationToken(QByteArray()));
+    QVERIFY(!emptyVerificationToken(QByteArray("malformed")));
+
+    QByteArray verificationToken;
+    appendLittleEndian(&verificationToken, quint32(1));
+    appendLittleEndian(&verificationToken, quint64(0));
+    appendLittleEndian(&verificationToken, quint64(0));
+    appendLittleEndian(&verificationToken, quint32(0));
+    appendBlob(&verificationToken,
+               serializeAuthSet(QVector<Parameter>()));
+    appendBlob(&verificationToken, QByteArray());
+    QVERIFY(emptyVerificationToken(verificationToken));
+
+    QByteArray hardwareVerificationToken = verificationToken;
+    const quint32 hardwareSecurityLevel = qToLittleEndian(quint32(1));
+    hardwareVerificationToken.replace(
+                sizeof(quint32) + 2 * sizeof(quint64),
+                sizeof(hardwareSecurityLevel),
+                reinterpret_cast<const char *>(&hardwareSecurityLevel),
+                sizeof(hardwareSecurityLevel));
+    QVERIFY(!emptyVerificationToken(hardwareVerificationToken));
+}
+
+void tst_keymintbinderclient::attestationFailsClosed()
+{
+    KeyMintBinderClient client;
+    QByteArray response("stale-certificate-chain");
+    const KeyMintBinderClient::CallResult result = client.oneShot(
+                AttestOperation, QByteArray("request-is-not-forwarded"), &response);
+    QVERIFY(result.transportSucceeded);
+    QCOMPARE(result.keyMintError, qint32(KmUnimplemented));
+    QVERIFY(!result.succeeded());
+    QVERIFY(response.isEmpty());
+}
+
+void tst_keymintbinderclient::legacyCertificateValidity()
+{
+    for (quint32 algorithm : {1U, 3U}) {
+        QVector<Parameter> parameters;
+        parameters << scalarParameter(TagAlgorithm, algorithm);
+        addLegacyCertificateValidity(&parameters);
+        QCOMPARE(parameters.size(), 3);
+        QCOMPARE(parameters.at(1).tag, TagCertificateNotBefore);
+        QCOMPARE(parameters.at(1).valueTag, qint32(ValueDateTime));
+        QCOMPARE(parameters.at(1).scalar, quint64(0));
+        QCOMPARE(parameters.at(2).tag, TagCertificateNotAfter);
+        QCOMPARE(parameters.at(2).valueTag, qint32(ValueDateTime));
+        QCOMPARE(parameters.at(2).scalar, Q_UINT64_C(253402300799000));
+
+        // Existing dates survive unchanged, and a second pass adds nothing.
+        parameters[1].scalar = 1234;
+        parameters[2].scalar = 5678;
+        const QByteArray original = serializeAuthSet(parameters);
+        addLegacyCertificateValidity(&parameters);
+        QCOMPARE(serializeAuthSet(parameters), original);
+
+        parameters.removeLast();
+        addLegacyCertificateValidity(&parameters);
+        QCOMPARE(parameters.at(1).scalar, quint64(1234));
+        QCOMPARE(parameters.at(2).scalar, Q_UINT64_C(253402300799000));
+
+        parameters.remove(1);
+        addLegacyCertificateValidity(&parameters);
+        QCOMPARE(parameters.at(1).tag, TagCertificateNotAfter);
+        QCOMPARE(parameters.at(2).tag, TagCertificateNotBefore);
+        QCOMPARE(parameters.at(2).scalar, quint64(0));
+    }
+    for (quint32 algorithm : {32U, 33U, 128U}) { // AES, 3DES, HMAC
+        QVector<Parameter> parameters;
+        parameters << scalarParameter(TagAlgorithm, algorithm);
+        const QByteArray original = serializeAuthSet(parameters);
+        addLegacyCertificateValidity(&parameters);
+        QCOMPARE(serializeAuthSet(parameters), original);
+    }
+    QVector<Parameter> empty;
+    addLegacyCertificateValidity(&empty);
+    QVERIFY(empty.isEmpty());
 }
 
 void tst_keymintbinderclient::hidlTokenLayout()

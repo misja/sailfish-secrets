@@ -47,6 +47,7 @@ MasterKeyController::MasterKeyController(
     , m_crypto(crypto)
     , m_store(secretsRootPath(), autotestMode)
     , m_broker(this)
+    , m_appSupport(autotestMode, this)
     , m_masterKey(Q_NULLPTR)
     , m_keyMint(Q_NULLPTR)
     , m_haveState(false)
@@ -68,6 +69,8 @@ MasterKeyController::MasterKeyController(
             this, &MasterKeyController::brokerLifecycleEvent);
     connect(&m_broker, &DeviceLockBrokerClient::commandCompleted,
             this, &MasterKeyController::brokerCommandCompleted);
+    connect(&m_appSupport, &AppSupportKeyStoreServer::androidResetAcknowledged,
+            this, &MasterKeyController::androidResetAcknowledged);
     connect(m_secrets, &SecretsRequestQueue::masterKeyLocked,
             this, &MasterKeyController::sessionExplicitlyLocked);
 }
@@ -77,6 +80,7 @@ MasterKeyController::~MasterKeyController()
     disconnect(m_secrets, &SecretsRequestQueue::masterKeyLocked,
                this, &MasterKeyController::sessionExplicitlyLocked);
     abortPendingOperation();
+    m_appSupport.lock();
     if (m_sessionUnlocked) {
         m_secrets->lockPlugins();
     }
@@ -89,6 +93,7 @@ MasterKeyController::~MasterKeyController()
 bool MasterKeyController::start(QString *errorMessage)
 {
     m_secrets->setKeyMintManaged(true);
+    m_appSupport.setMasterKeyStore(&m_store);
     findKeyMintProvider();
     QString keyMintLockError;
     if (!m_keyMintDeviceLock.startup(&keyMintLockError)) {
@@ -97,9 +102,17 @@ bool MasterKeyController::start(QString *errorMessage)
                 << keyMintLockError;
     }
 
+    QString socketError;
+    if (!m_appSupport.start(&socketError)) {
+        if (errorMessage) {
+            *errorMessage = socketError;
+        }
+        return false;
+    }
     if (!m_store.prepare(errorMessage) || !restoreReset(errorMessage)) {
         return false;
     }
+    updateAppSupportState();
     m_broker.connectToBroker();
     return true;
 }
@@ -120,6 +133,7 @@ bool MasterKeyController::findKeyMintProvider()
             m_masterKey = masterKey;
             m_keyMint = keyMint;
             m_keyMintDeviceLock.setProvider(keyMint);
+            m_appSupport.setKeyMintProvider(provider);
             return true;
         }
     }
@@ -144,6 +158,7 @@ void MasterKeyController::brokerUnavailable()
     }
     m_haveState = false;
     lockSession();
+    updateAppSupportState();
     if (!m_reconnectScheduled) {
         m_reconnectScheduled = true;
         QTimer::singleShot(5000, this,
@@ -175,6 +190,7 @@ void MasterKeyController::brokerStateChanged(
             || (m_sessionUnlocked && !stateCanBootstrap())) {
         lockSession();
     }
+    updateAppSupportState();
     processState();
 }
 
@@ -369,6 +385,7 @@ void MasterKeyController::brokerAuthenticationCompleted(
         m_pendingChallenge = 0;
     }
     abortPendingOperation();
+    updateAppSupportState();
 }
 
 bool MasterKeyController::unlockWithRoot(
@@ -382,6 +399,18 @@ bool MasterKeyController::unlockWithRoot(
     }
     m_sessionUnlocked = true;
 
+    QByteArray resetTransaction;
+    QString resetError;
+    const MasterKeyStore::ResetStage resetStage = m_store.resetStage(
+                &resetTransaction, &resetError);
+    if (resetError.isEmpty() && resetStage == MasterKeyStore::NoReset) {
+        QString appSupportError;
+        if (!m_appSupport.unlock(m_secrets->appSupportDatabaseKey(),
+                                 m_state.sailfishUserId, &appSupportError)) {
+            qCWarning(lcSailfishSecretsDaemon)
+                    << "Unable to unlock the AppSupport key store:" << appSupportError;
+        }
+    }
     return true;
 }
 
@@ -424,7 +453,7 @@ void MasterKeyController::brokerLifecycleEvent(
         MasterKeyStore::ResetReason reason = MasterKeyStore::CredentialRemovalReset;
         const MasterKeyStore::ResetStage stage = m_store.resetStage(
                     &resetTransaction, &error, &reason);
-        if (error.isEmpty() && stage == MasterKeyStore::LifecycleAcknowledged
+        if (error.isEmpty() && stage == MasterKeyStore::AndroidAcknowledged
                 && reason == MasterKeyStore::CredentialRemovalReset
                 && resetTransaction == transactionId) {
             if (!m_store.finishReset(&error)) {
@@ -432,6 +461,7 @@ void MasterKeyController::brokerLifecycleEvent(
                         << "Unable to finish the removed credential reset:" << error;
             }
         }
+        updateAppSupportState();
         return;
     }
     if (event == DeviceLockBrokerClient::UserChanged) {
@@ -492,21 +522,26 @@ bool MasterKeyController::resumeReset(
     }
 
     if (stage == MasterKeyStore::ResetStarted) {
+        QString destroyError;
+        if (!m_appSupport.destroyStoredKeys(&destroyError)) {
+            qCWarning(lcSailfishSecretsDaemon) << destroyError;
+        }
         lockSession();
         if (!m_store.deleteForReset(errorMessage)) {
             return false;
         }
         stage = MasterKeyStore::StorageDeleted;
     }
+    quint64 generation = 0;
     QByteArray generationTransaction;
     if (stage == MasterKeyStore::StorageDeleted) {
-        if (!m_store.commitResetGeneration(Q_NULLPTR, errorMessage)) {
+        if (!m_store.commitResetGeneration(&generation, errorMessage)) {
             return false;
         }
         generationTransaction = transactionId;
         stage = MasterKeyStore::GenerationCommitted;
     } else {
-        m_store.generation(errorMessage, &generationTransaction);
+        generation = m_store.generation(errorMessage, &generationTransaction);
         if (errorMessage && !errorMessage->isEmpty()) {
             return false;
         }
@@ -518,6 +553,7 @@ bool MasterKeyController::resumeReset(
         stage = MasterKeyStore::LifecycleAcknowledged;
     }
 
+    m_appSupport.setStoreState(false, generation, transactionId);
     if (acknowledgeBroker
             && reason == MasterKeyStore::CredentialRemovalReset
             && event == DeviceLockBrokerClient::RemovePending
@@ -525,7 +561,7 @@ bool MasterKeyController::resumeReset(
         sendLifecycleAcknowledgement(transactionId,
                                      DeviceLockBrokerClient::RemovePending);
     }
-    if (stage == MasterKeyStore::LifecycleAcknowledged
+    if (stage == MasterKeyStore::AndroidAcknowledged
             && (reason == MasterKeyStore::AlphaMigrationReset
                 || reason == MasterKeyStore::IdentityInvalidationReset
                 || (reason == MasterKeyStore::CredentialRemovalReset
@@ -539,6 +575,7 @@ bool MasterKeyController::resumeReset(
         if (!m_store.finishReset(errorMessage)) {
             return false;
         }
+        updateAppSupportState();
     }
     return true;
 }
@@ -553,9 +590,50 @@ void MasterKeyController::sendLifecycleAcknowledgement(
     }
 }
 
+void MasterKeyController::androidResetAcknowledged(
+        quint64 generation,
+        const QByteArray &transactionId)
+{
+    Q_UNUSED(generation)
+    Q_UNUSED(transactionId)
+    QString error;
+    if (!restoreReset(&error)) {
+        qCWarning(lcSailfishSecretsDaemon)
+                << "Unable to finish an acknowledged Secrets reset:" << error;
+        return;
+    }
+    updateAppSupportState();
+    processState();
+}
+
+void MasterKeyController::updateAppSupportState()
+{
+    QString error;
+    QByteArray resetTransaction;
+    const MasterKeyStore::ResetStage stage = m_store.resetStage(
+                &resetTransaction, &error);
+    const quint64 generation = m_store.generation(&error);
+    if (!error.isEmpty()) {
+        qCWarning(lcSailfishSecretsDaemon) << error;
+        return;
+    }
+    const bool resetPending = stage != MasterKeyStore::NoReset;
+    if (m_sessionUnlocked && !resetPending && !m_appSupport.store()->isOpen()) {
+        QString appSupportError;
+        if (!m_appSupport.unlock(m_secrets->appSupportDatabaseKey(),
+                                 m_state.sailfishUserId, &appSupportError)) {
+            qCWarning(lcSailfishSecretsDaemon)
+                    << "Unable to unlock the AppSupport key store:" << appSupportError;
+        }
+    }
+    m_appSupport.setStoreState(stateCanBootstrap(), generation,
+                               resetPending ? resetTransaction : QByteArray());
+}
+
 void MasterKeyController::lockSession()
 {
     abortPendingOperation();
+    m_appSupport.lock();
     if (m_sessionUnlocked && !m_secrets->lockPlugins()) {
         qCWarning(lcSailfishSecretsDaemon) << "Unable to close every Secrets database";
     }
@@ -567,8 +645,10 @@ void MasterKeyController::lockSession()
 
 void MasterKeyController::sessionExplicitlyLocked()
 {
+    m_appSupport.lock();
     m_sessionUnlocked = false;
     abortPendingOperation();
+    updateAppSupportState();
 }
 
 void MasterKeyController::abortPendingOperation()

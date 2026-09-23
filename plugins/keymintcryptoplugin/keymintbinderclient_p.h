@@ -48,6 +48,18 @@ public:
                                    const QByteArray &serializedHardwareAuthToken,
                                    QByteArray *rootKey);
 
+    CallResult oneShot(quint32 operation,
+                       const QByteArray &request,
+                       QByteArray *response);
+    CallResult begin(const QByteArray &request,
+                     quint64 *operationHandle,
+                     QByteArray *response);
+    CallResult update(quint64 operationHandle,
+                      const QByteArray &request,
+                      QByteArray *response);
+    CallResult finish(quint64 operationHandle,
+                      const QByteArray &request,
+                      QByteArray *response);
     CallResult abort(quint64 operationHandle);
     CallResult deviceLocked(bool passwordOnly);
     CallResult setAuthenticationState(quint64 secureUserId,

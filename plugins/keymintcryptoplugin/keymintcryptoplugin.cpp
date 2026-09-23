@@ -186,58 +186,44 @@ Result KeyMintCryptoPlugin::finishOpenMasterKey(
                            Result::CryptoPluginDecryptionError);
 }
 
-// The native provider exposes master-key operations and device-lock state.
-// Other optional operation hooks are unsupported by this provider.
 Result KeyMintCryptoPlugin::keyMintOneShot(
-        quint32, const QByteArray &, qint32 *keyMintError, QByteArray *response)
+        quint32 operation,
+        const QByteArray &request,
+        qint32 *keyMintError,
+        QByteArray *response)
 {
-    if (response) {
-        response->clear();
-    }
-    if (keyMintError) {
-        *keyMintError = -100;
-    }
-    return notSupported();
+    return keyMintResult(m_client->oneShot(operation, request, response),
+                         keyMintError);
 }
 
 Result KeyMintCryptoPlugin::keyMintBegin(
-        const QByteArray &, qint32 *keyMintError,
-        quint64 *operationHandle, QByteArray *response)
+        const QByteArray &request,
+        qint32 *keyMintError,
+        quint64 *operationHandle,
+        QByteArray *response)
 {
-    if (operationHandle) {
-        *operationHandle = 0;
-    }
-    if (response) {
-        response->clear();
-    }
-    if (keyMintError) {
-        *keyMintError = -100;
-    }
-    return notSupported();
+    return keyMintResult(m_client->begin(request, operationHandle, response),
+                         keyMintError);
 }
 
 Result KeyMintCryptoPlugin::keyMintUpdate(
-        quint64, const QByteArray &, qint32 *keyMintError, QByteArray *response)
+        quint64 operationHandle,
+        const QByteArray &request,
+        qint32 *keyMintError,
+        QByteArray *response)
 {
-    if (response) {
-        response->clear();
-    }
-    if (keyMintError) {
-        *keyMintError = -100;
-    }
-    return notSupported();
+    return keyMintResult(m_client->update(operationHandle, request, response),
+                         keyMintError);
 }
 
 Result KeyMintCryptoPlugin::keyMintFinish(
-        quint64, const QByteArray &, qint32 *keyMintError, QByteArray *response)
+        quint64 operationHandle,
+        const QByteArray &request,
+        qint32 *keyMintError,
+        QByteArray *response)
 {
-    if (response) {
-        response->clear();
-    }
-    if (keyMintError) {
-        *keyMintError = -100;
-    }
-    return notSupported();
+    return keyMintResult(m_client->finish(operationHandle, request, response),
+                         keyMintError);
 }
 
 Result KeyMintCryptoPlugin::keyMintAbort(

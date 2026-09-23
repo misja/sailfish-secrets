@@ -7,6 +7,7 @@
 #ifndef SAILFISHSECRETS_MASTERKEYCONTROLLER_P_H
 #define SAILFISHSECRETS_MASTERKEYCONTROLLER_P_H
 
+#include "appsupportkeystoreserver_p.h"
 #include "devicelockbrokerclient_p.h"
 #include "keymintdevicelocknotifier_p.h"
 #include "masterkeymanager_p.h"
@@ -57,6 +58,8 @@ private Q_SLOTS:
                               const QByteArray &identityEpoch,
                               const QByteArray &transactionId);
     void brokerCommandCompleted(quint64 requestId, qint32 status);
+    void androidResetAcknowledged(quint64 generation,
+                                  const QByteArray &transactionId);
     void sessionExplicitlyLocked();
 
 private:
@@ -81,6 +84,7 @@ private:
     void beginOpenMasterKey(const MasterKeyEnvelope &envelope);
     bool unlockWithRoot(const QByteArray &rootKey,
                         const MasterKeyEnvelope &envelope);
+    void updateAppSupportState();
     void lockSession();
     void abortPendingOperation();
     bool setPendingRoot(const QByteArray &rootKey);
@@ -94,6 +98,7 @@ private:
     MasterKeyStore m_store;
     DeviceLockBrokerClient m_broker;
     KeyMintDeviceLockNotifier m_keyMintDeviceLock;
+    AppSupportKeyStoreServer m_appSupport;
     Sailfish::Crypto::MasterKeyPluginExtension *m_masterKey;
     Sailfish::Crypto::KeyMintOperationExtension *m_keyMint;
     DeviceLockBrokerClient::State m_state;

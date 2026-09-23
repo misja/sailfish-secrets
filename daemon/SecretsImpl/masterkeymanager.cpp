@@ -189,7 +189,8 @@ QByteArray MasterKeyDerivation::randomRootKey()
 bool MasterKeyDerivation::derive(const QByteArray &rootKey,
                                  const MasterKeyEnvelope &envelope,
                                  QByteArray *bookkeepingDatabaseKey,
-                                 QByteArray *deviceLockKey)
+                                 QByteArray *deviceLockKey,
+                                 QByteArray *appSupportDatabaseKey)
 {
     if (rootKey.size() != RootKeySize || !envelope.isValid()
             || !bookkeepingDatabaseKey || !deviceLockKey) {
@@ -206,16 +207,28 @@ bool MasterKeyDerivation::derive(const QByteArray &rootKey,
     QByteArray device = hkdfExpand(
                 pseudoRandomKey,
                 QByteArrayLiteral("sailfish-secrets/device-lock/v1"), RootKeySize);
-    if (bookkeeping.size() != RootKeySize || device.size() != RootKeySize) {
+    QByteArray appSupport;
+    if (appSupportDatabaseKey) {
+        appSupport = hkdfExpand(
+                    pseudoRandomKey,
+                    QByteArrayLiteral("sailfish-secrets/appsupport-db/v1"), RootKeySize);
+    }
+    if (bookkeeping.size() != RootKeySize || device.size() != RootKeySize
+            || (appSupportDatabaseKey && appSupport.size() != RootKeySize)) {
         clear(&bookkeeping);
         clear(&device);
+        clear(&appSupport);
         clear(&pseudoRandomKey);
         return false;
     }
 
     *bookkeepingDatabaseKey = bookkeeping.toHex();
     *deviceLockKey = device;
+    if (appSupportDatabaseKey) {
+        *appSupportDatabaseKey = appSupport.toHex();
+    }
     clear(&bookkeeping);
+    clear(&appSupport);
     clear(&pseudoRandomKey);
     return true;
 }
@@ -482,6 +495,36 @@ bool MasterKeyStore::commitResetGeneration(quint64 *committedGeneration,
     return true;
 }
 
+bool MasterKeyStore::acknowledgeAndroidReset(
+        quint64 acknowledgedGeneration,
+        const QByteArray &acknowledgedTransaction,
+        QString *errorMessage)
+{
+    QByteArray transactionId;
+    QString stageError;
+    ResetReason reason = CredentialRemovalReset;
+    const ResetStage stage = resetStage(&transactionId, &stageError, &reason);
+    if (!stageError.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = stageError;
+        }
+        return false;
+    }
+    const quint64 currentGeneration = generation(errorMessage);
+    if ((errorMessage && !errorMessage->isEmpty())
+            || acknowledgedGeneration != currentGeneration
+            || acknowledgedTransaction != transactionId
+            || stage < LifecycleAcknowledged) {
+        if (errorMessage && errorMessage->isEmpty()) {
+            *errorMessage = QStringLiteral("Android acknowledged the wrong reset transaction");
+        }
+        return false;
+    }
+    return stage >= AndroidAcknowledged
+            || writeResetState(AndroidAcknowledged, transactionId,
+                               reason, errorMessage);
+}
+
 bool MasterKeyStore::acknowledgeReset(QString *errorMessage)
 {
     QByteArray transactionId;
@@ -520,7 +563,7 @@ bool MasterKeyStore::finishReset(QString *errorMessage)
     if (stage == NoReset) {
         return true;
     }
-    if (stage != LifecycleAcknowledged) {
+    if (stage != AndroidAcknowledged) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Reset has not been acknowledged");
         }
@@ -581,7 +624,7 @@ MasterKeyStore::ResetStage MasterKeyStore::resetStage(
     if (!readBlob(&stream, &parsedTransaction, 16)
             || parsedTransaction.size() != 16
             || stream.status() != QDataStream::Ok || !stream.atEnd()
-            || stageValue < ResetStarted || stageValue > LifecycleAcknowledged
+            || stageValue < ResetStarted || stageValue > AndroidAcknowledged
             || reasonValue < AlphaMigrationReset
             || reasonValue > IdentityInvalidationReset) {
         if (errorMessage) {

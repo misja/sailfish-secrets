@@ -43,7 +43,8 @@ public:
     static bool derive(const QByteArray &rootKey,
                        const MasterKeyEnvelope &envelope,
                        QByteArray *bookkeepingDatabaseKey,
-                       QByteArray *deviceLockKey);
+                       QByteArray *deviceLockKey,
+                       QByteArray *appSupportDatabaseKey = Q_NULLPTR);
     static void clear(QByteArray *data);
 };
 
@@ -55,7 +56,8 @@ public:
         ResetStarted = 1,
         StorageDeleted = 2,
         GenerationCommitted = 3,
-        LifecycleAcknowledged = 4
+        LifecycleAcknowledged = 4,
+        AndroidAcknowledged = 5
     };
 
     enum ResetReason {
@@ -75,6 +77,9 @@ public:
                     ResetReason reason = CredentialRemovalReset);
     bool deleteForReset(QString *errorMessage);
     bool commitResetGeneration(quint64 *generation, QString *errorMessage);
+    bool acknowledgeAndroidReset(quint64 generation,
+                                 const QByteArray &transactionId,
+                                 QString *errorMessage);
     bool acknowledgeReset(QString *errorMessage);
     bool finishReset(QString *errorMessage);
     ResetStage resetStage(QByteArray *transactionId,

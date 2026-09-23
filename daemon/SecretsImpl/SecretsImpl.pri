@@ -10,6 +10,8 @@ HEADERS += \
     $$PWD/secrets_p.h \
     $$PWD/secretsrequestprocessor_p.h \
     $$PWD/applicationpermissions_p.h \
+    $$PWD/appsupportkeystore_p.h \
+    $$PWD/appsupportkeystoreserver_p.h \
     $$PWD/dataprotector_p.h \
     $$PWD/devicelockbrokerclient_p.h \
     $$PWD/keymintdevicelocknotifier_p.h \
@@ -23,6 +25,8 @@ SOURCES += \
     $$PWD/secrets.cpp \
     $$PWD/secretsrequestprocessor.cpp \
     $$PWD/applicationpermissions.cpp \
+    $$PWD/appsupportkeystore.cpp \
+    $$PWD/appsupportkeystoreserver.cpp \
     $$PWD/dataprotector.cpp \
     $$PWD/devicelockbrokerclient.cpp \
     $$PWD/keymintdevicelocknotifier.cpp \

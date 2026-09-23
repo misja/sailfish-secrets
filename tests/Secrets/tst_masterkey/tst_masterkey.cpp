@@ -5,6 +5,7 @@
  */
 
 #include "../../../daemon/SecretsImpl/masterkeymanager_p.h"
+#include "../../../daemon/SecretsImpl/appsupportkeystore_p.h"
 
 #include <QtCore/QDir>
 #include <QtCore/QFile>
@@ -26,6 +27,7 @@ private Q_SLOTS:
     void envelopeRoundTrip();
     void envelopeRejectsMalformedInput();
     void derivationIsSeparatedAndIdentityBound();
+    void opaqueReferenceRoundTrip();
     void alphaResetIsOneShot();
     void resetTransactionResumesAtEveryStage();
 
@@ -108,10 +110,15 @@ void tst_masterkey::derivationIsSeparatedAndIdentityBound()
     QByteArray root(32, '\x33');
     QByteArray bookkeeping;
     QByteArray device;
-    QVERIFY(MasterKeyDerivation::derive(root, envelope(), &bookkeeping, &device));
+    QByteArray appSupport;
+    QVERIFY(MasterKeyDerivation::derive(root, envelope(), &bookkeeping, &device,
+                                        &appSupport));
     QCOMPARE(bookkeeping.size(), 64);
     QCOMPARE(device.size(), 32);
+    QCOMPARE(appSupport.size(), 64);
     QVERIFY(bookkeeping != device.toHex());
+    QVERIFY(bookkeeping != appSupport);
+    QVERIFY(device.toHex() != appSupport);
 
     MasterKeyEnvelope changed = envelope();
     changed.identityEpoch[0] = static_cast<char>(changed.identityEpoch.at(0) ^ 1);
@@ -124,6 +131,27 @@ void tst_masterkey::derivationIsSeparatedAndIdentityBound()
 
     MasterKeyDerivation::clear(&root);
     QVERIFY(root.isEmpty());
+}
+
+void tst_masterkey::opaqueReferenceRoundTrip()
+{
+    const AppSupportKeyReference expected = AppSupportKeyReference::create();
+    QVERIFY(expected.isValid());
+    const QByteArray serialized = expected.serialize();
+    QCOMPARE(serialized.size(), int(AppSupportKeyReference::SerializedSize));
+
+    AppSupportKeyReference actual;
+    QVERIFY(AppSupportKeyReference::deserialize(serialized, &actual));
+    QCOMPARE(actual.identifier, expected.identifier);
+
+    QByteArray malformed = serialized;
+    malformed[0] = static_cast<char>(malformed.at(0) ^ 1);
+    QVERIFY(!AppSupportKeyReference::deserialize(malformed, &actual));
+    QVERIFY(!AppSupportKeyReference::deserialize(serialized + QByteArray(1, '\0'), &actual));
+
+    const AppSupportKeyReference second = AppSupportKeyReference::create();
+    QVERIFY(second.isValid());
+    QVERIFY(second.identifier != expected.identifier);
 }
 
 void tst_masterkey::alphaResetIsOneShot()
@@ -143,6 +171,8 @@ void tst_masterkey::alphaResetIsOneShot()
              MasterKeyStore::GenerationCommitted);
     QCOMPARE(store.generation(&error), quint64(1));
     QVERIFY2(store.acknowledgeReset(&error), qPrintable(error));
+    QVERIFY2(store.acknowledgeAndroidReset(1, migrationTransaction, &error),
+             qPrintable(error));
     QVERIFY2(store.finishReset(&error), qPrintable(error));
 
     QFile currentFile(testPath() + QStringLiteral("/current.db"));
@@ -161,6 +191,8 @@ void tst_masterkey::resetTransactionResumesAtEveryStage()
     QCOMPARE(store.resetStage(&migrationTransaction, &error),
              MasterKeyStore::GenerationCommitted);
     QVERIFY2(store.acknowledgeReset(&error), qPrintable(error));
+    QVERIFY2(store.acknowledgeAndroidReset(1, migrationTransaction, &error),
+             qPrintable(error));
     QVERIFY2(store.finishReset(&error), qPrintable(error));
     QVERIFY2(store.store(envelope(), &error), qPrintable(error));
 
@@ -187,10 +219,11 @@ void tst_masterkey::resetTransactionResumesAtEveryStage()
     QVERIFY2(resumed.commitResetGeneration(&repeatedGeneration, &error),
              qPrintable(error));
     QCOMPARE(repeatedGeneration, generation);
-    QVERIFY(!resumed.finishReset(&error));
-    error.clear();
     QVERIFY2(resumed.acknowledgeReset(&error), qPrintable(error));
     QCOMPARE(resumed.resetStage(&actualTransaction, &error), MasterKeyStore::LifecycleAcknowledged);
+    QVERIFY2(resumed.acknowledgeAndroidReset(generation, transaction, &error),
+             qPrintable(error));
+    QCOMPARE(resumed.resetStage(&actualTransaction, &error), MasterKeyStore::AndroidAcknowledged);
     QVERIFY2(resumed.finishReset(&error), qPrintable(error));
     QCOMPARE(resumed.resetStage(&actualTransaction, &error), MasterKeyStore::NoReset);
 }

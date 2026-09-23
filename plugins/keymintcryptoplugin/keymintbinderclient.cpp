@@ -108,6 +108,24 @@ enum OperationTransaction {
     AbortTransaction = 4
 };
 
+enum AppSupportOperation {
+    CapabilitiesOperation = 1,
+    GenerateOperation = 2,
+    ImportOperation = 3,
+    ExportOperation = 4,
+    CharacteristicsOperation = 5,
+    DeleteOperation = 6,
+    DeleteAllOperation = 7,
+    BeginOperation = 8,
+    UpdateOperation = 9,
+    FinishOperation = 10,
+    AbortOperation = 11,
+    AddEntropyOperation = 12,
+    UpgradeOperation = 13,
+    AttestOperation = 14,
+    ImportWrappedOperation = 15
+};
+
 enum KeyPurpose {
     PurposeEncrypt = 0,
     PurposeDecrypt = 1
@@ -165,7 +183,8 @@ enum BinderException {
 };
 
 // android.hardware.security.keymint.SecurityLevel.  KEYSTORE (100) is not a
-// KeyMint hardware implementation.
+// KeyMint hardware implementation and must never be advertised to AppSupport
+// as one.
 enum KeyMintSecurityLevel {
     SecurityLevelSoftware = 0,
     SecurityLevelTrustedEnvironment = 1,
@@ -183,6 +202,21 @@ void appendBlob(QByteArray *output, const QByteArray &blob)
 {
     appendLittleEndian(output, quint32(blob.size()));
     output->append(blob);
+}
+
+QByteArray serializeCapabilitiesResponse(qint32 securityLevel)
+{
+    // AKS Capabilities response v1 is exactly two little-endian u32 values:
+    // protocol version at offset 0 and KeyMint SecurityLevel at offset 4.
+    if (securityLevel != SecurityLevelSoftware
+            && securityLevel != SecurityLevelTrustedEnvironment
+            && securityLevel != SecurityLevelStrongBox) {
+        return QByteArray();
+    }
+    QByteArray response;
+    appendLittleEndian(&response, ProtocolVersion);
+    appendLittleEndian(&response, quint32(securityLevel));
+    return response;
 }
 
 class Cursor
@@ -349,6 +383,32 @@ Parameter scalarParameter(quint32 tag, quint64 value)
     return parameter;
 }
 
+void addLegacyCertificateValidity(QVector<Parameter> *parameters)
+{
+    bool asymmetric = false;
+    bool notBefore = false;
+    bool notAfter = false;
+    for (const Parameter &parameter : *parameters) {
+        if (parameter.tag == TagAlgorithm) {
+            asymmetric = parameter.scalar == 1 || parameter.scalar == 3; // RSA or EC
+        }
+        notBefore |= parameter.tag == TagCertificateNotBefore;
+        notAfter |= parameter.tag == TagCertificateNotAfter;
+    }
+    if (asymmetric) {
+        // Legacy Keymaster omits certificate dates. Android constructs the
+        // app-facing certificate itself; these dates are only for KeyMint's
+        // internal certificate, from which we extract the public key.
+        if (!notBefore) {
+            *parameters << scalarParameter(TagCertificateNotBefore, 0);
+        }
+        if (!notAfter) {
+            // RFC 5280's undefined expiration: 9999-12-31T23:59:59Z.
+            *parameters << scalarParameter(TagCertificateNotAfter, Q_UINT64_C(253402300799000));
+        }
+    }
+}
+
 Parameter blobParameter(quint32 tag, const QByteArray &value)
 {
     Parameter parameter;
@@ -416,6 +476,54 @@ QByteArray serializeAuthSet(const QVector<Parameter> &parameters)
         appendBlob(&serialized, parameter.blob);
     }
     return serialized;
+}
+
+QByteArray serializeCharacteristics(const Characteristics &characteristics)
+{
+    const QByteArray hardware = serializeAuthSet(characteristics.hardware);
+    const QByteArray software = serializeAuthSet(characteristics.software);
+    if (hardware.isEmpty() || software.isEmpty()) {
+        return QByteArray();
+    }
+    QByteArray serialized;
+    appendLittleEndian(&serialized, ProtocolVersion);
+    appendBlob(&serialized, hardware);
+    appendBlob(&serialized, software);
+    return serialized;
+}
+
+bool policyMatchesIdentity(const QVector<Parameter> &parameters,
+                           quint64 activeSecureUserId,
+                           quint64 activeFingerprintAuthenticatorId)
+{
+    bool noAuthenticationRequired = false;
+    bool fingerprintAuthenticationAllowed = false;
+    bool haveSecureUserId = false;
+    bool secureUserIdsValid = true;
+    for (const Parameter &parameter : parameters) {
+        if (parameter.tag == TagNoAuthRequired
+                && parameter.valueTag == ValueBool && parameter.scalar == 1) {
+            noAuthenticationRequired = true;
+        } else if (parameter.tag == TagUserAuthType
+                   && parameter.valueTag == ValueHardwareAuthenticatorType
+                   && (parameter.scalar & AuthenticatorFingerprint) != 0) {
+            fingerprintAuthenticationAllowed = true;
+        }
+    }
+    for (const Parameter &parameter : parameters) {
+        if (parameter.tag == TagUserSecureId
+                && parameter.valueTag == ValueLongInteger) {
+            haveSecureUserId = true;
+            if (parameter.scalar != activeSecureUserId
+                    && (!fingerprintAuthenticationAllowed
+                        || !activeFingerprintAuthenticatorId
+                        || parameter.scalar != activeFingerprintAuthenticatorId)) {
+                secureUserIdsValid = false;
+            }
+        }
+    }
+    return noAuthenticationRequired
+            ? !haveSecureUserId : haveSecureUserId && secureUserIdsValid;
 }
 
 bool tokenMatchesIdentity(const HardwareAuthToken &token,
@@ -828,6 +936,85 @@ bool parseMasterHardwareAuthToken(const QByteArray &serialized,
     return true;
 }
 
+bool parseAppHardwareAuthToken(Cursor *cursor, HardwareAuthToken *token)
+{
+    quint32 present = 0;
+    HardwareAuthToken parsed;
+    if (!cursor || !token || !cursor->take(&present) || present > 1) {
+        return false;
+    }
+    if (!present) {
+        *token = parsed;
+        return true;
+    }
+    if (!cursor->take(&parsed.version) || parsed.version != 1
+            || !cursor->take(&parsed.challenge)
+            || !cursor->take(&parsed.userId)
+            || !cursor->take(&parsed.authenticatorId)
+            || !cursor->take(&parsed.authenticatorType)
+            || !cursor->take(&parsed.timestamp)
+            || !cursor->takeBlob(&parsed.mac, 32) || parsed.mac.size() != 32) {
+        return false;
+    }
+    parsed.present = true;
+    *token = parsed;
+    return true;
+}
+
+bool emptyVerificationToken(const QByteArray &serialized)
+{
+    if (serialized.isEmpty()) {
+        return true;
+    }
+    Cursor cursor(serialized);
+    quint32 version = 0;
+    quint64 challenge = 0;
+    quint64 timestamp = 0;
+    quint32 securityLevel = 0;
+    QByteArray parametersData;
+    QByteArray mac;
+    QVector<Parameter> parameters;
+    if (!cursor.take(&version) || version != 1
+            || !cursor.take(&challenge) || !cursor.take(&timestamp)
+            || !cursor.take(&securityLevel)
+            || !cursor.takeBlob(&parametersData)
+            || !parseAuthSet(parametersData, &parameters)
+            || !cursor.takeBlob(&mac, 32) || !cursor.atEnd()) {
+        return false;
+    }
+    bool macIsEmpty = true;
+    for (char value : mac) {
+        if (value != 0) {
+            macIsEmpty = false;
+            break;
+        }
+    }
+    return challenge == 0 && timestamp == 0 && securityLevel == 0
+            && parameters.isEmpty()
+            && (mac.isEmpty() || macIsEmpty);
+}
+
+QVector<QByteArray> associatedData(const QVector<Parameter> &parameters)
+{
+    QVector<QByteArray> result;
+    for (const Parameter &parameter : parameters) {
+        if (parameter.tag == TagAssociatedData && parameter.valueTag == ValueBlob) {
+            result.append(parameter.blob);
+        }
+    }
+    return result;
+}
+
+QByteArray confirmationToken(const QVector<Parameter> &parameters)
+{
+    for (const Parameter &parameter : parameters) {
+        if (parameter.tag == TagConfirmationToken && parameter.valueTag == ValueBlob) {
+            return parameter.blob;
+        }
+    }
+    return QByteArray();
+}
+
 QByteArray nonceFromParameters(const QVector<Parameter> &parameters)
 {
     for (const Parameter &parameter : parameters) {
@@ -890,6 +1077,7 @@ public:
         , activeSecureUserId(0)
         , brokerSecureUserId(0)
         , activeFingerprintAuthenticatorId(0)
+        , nextOperationHandle(0x8000000000000001ULL)
     {
     }
 
@@ -993,8 +1181,17 @@ public:
         delete operation;
     }
 
+    void clearAppOperations(bool sendAbort)
+    {
+        for (BinderOperation *operation : appOperations) {
+            destroyOperation(operation, sendAbort);
+        }
+        appOperations.clear();
+    }
+
     void clearOperations(bool sendAbort = false)
     {
+        clearAppOperations(sendAbort);
         for (MasterOperation *operation : masterOperations) {
             destroyMasterOperation(operation, sendAbort);
         }
@@ -1084,6 +1281,62 @@ public:
     {
         return CallResult(false, KmSecureHardwareCommunicationFailed,
                           QStringLiteral("Malformed KeyMint %1 reply").arg(what));
+    }
+
+    CallResult getHardwareInfo(qint32 *securityLevel)
+    {
+        if (!securityLevel) {
+            return CallResult(false, KmInvalidArgument,
+                              QStringLiteral("Missing KeyMint security-level output"));
+        }
+        const CallResult ready = ensureClient();
+        if (!ready.succeeded()) {
+            return ready;
+        }
+        if (hidl) {
+            return CallResult(true, KmUnimplemented);
+        }
+        GBinderLocalRequest *request = gbinder_client_new_request(client);
+        if (!request) {
+            return CallResult(false, KmUnknownError,
+                              QStringLiteral("Unable to allocate getHardwareInfo request"));
+        }
+
+        GBinderRemoteReply *reply = Q_NULLPTR;
+        GBinderReader reader;
+        CallResult result = transact(client, GetHardwareInfoTransaction,
+                                     request, &reply, &reader);
+        qint32 parsedSecurityLevel = -1;
+        if (result.succeeded()) {
+            gsize hardwareInfoEnd = 0;
+            bool nonNull = false;
+            gint32 versionNumber = 0;
+            gboolean timestampTokenRequired = false;
+            if (!startParcelable(&reader, &hardwareInfoEnd, &nonNull)
+                    || !nonNull
+                    || !gbinder_reader_read_int32(&reader, &versionNumber)
+                    || !gbinder_reader_read_int32(&reader, &parsedSecurityLevel)
+                    || !gbinder_reader_skip_string16(&reader)
+                    || !gbinder_reader_skip_string16(&reader)
+                    || !gbinder_reader_read_bool(&reader,
+                                                 &timestampTokenRequired)
+                    || !finishParcelable(&reader, hardwareInfoEnd)
+                    || !gbinder_reader_at_end(&reader)) {
+                result = parseFailure(QStringLiteral("getHardwareInfo"));
+            } else if (serializeCapabilitiesResponse(parsedSecurityLevel).isEmpty()) {
+                result = CallResult(false, KmHardwareTypeUnavailable,
+                                    QStringLiteral("Unsupported KeyMint security level %1")
+                                    .arg(parsedSecurityLevel));
+            }
+        }
+        if (reply) {
+            gbinder_remote_reply_unref(reply);
+        }
+        gbinder_local_request_unref(request);
+        if (result.succeeded()) {
+            *securityLevel = parsedSecurityLevel;
+        }
+        return result;
     }
 
     static bool readCharacteristics(GBinderReader *reader,
@@ -1615,6 +1868,20 @@ public:
         return result;
     }
 
+    CallResult validatePolicy(const QVector<Parameter> &parameters) const
+    {
+        if (!activeSecureUserId || brokerSecureUserId != activeSecureUserId) {
+            return CallResult(true, KmNotConfigured,
+                              QStringLiteral("No active Sailfish Gatekeeper identity"));
+        }
+        if (!policyMatchesIdentity(parameters, activeSecureUserId,
+                                   activeFingerprintAuthenticatorId)) {
+            return CallResult(true, KmInvalidUserId,
+                              QStringLiteral("Key policy contains an inactive authenticator ID"));
+        }
+        return CallResult(true, KmOk);
+    }
+
     CallResult validateToken(const HardwareAuthToken &token,
                              quint64 expectedChallenge = 0) const
     {
@@ -1647,6 +1914,8 @@ public:
     quint64 activeSecureUserId;
     quint64 brokerSecureUserId;
     quint64 activeFingerprintAuthenticatorId;
+    quint64 nextOperationHandle;
+    QHash<quint64, BinderOperation *> appOperations;
     QHash<QByteArray, MasterOperation *> masterOperations;
     QHash<quint64, QByteArray> masterChallenges;
 };
@@ -1738,7 +2007,8 @@ KeyMintBinderClient::CallResult KeyMintBinderClient::beginCreateMasterKey(
         }
         context.prepend(MasterContextMagic);
     }
-    if (d->masterChallenges.contains(binderOperation->challenge)) {
+    if (d->masterChallenges.contains(binderOperation->challenge)
+            || d->appOperations.contains(binderOperation->challenge)) {
         Private::destroyOperation(binderOperation, true);
         d->deleteKey(creation.key.rawBlob);
         return CallResult(true, KmConcurrentAccessConflict,
@@ -1869,7 +2139,8 @@ KeyMintBinderClient::CallResult KeyMintBinderClient::beginOpenMasterKey(
     }
     context.prepend(MasterContextMagic);
     if (d->masterOperations.contains(context)
-            || d->masterChallenges.contains(binderOperation->challenge)) {
+            || d->masterChallenges.contains(binderOperation->challenge)
+            || d->appOperations.contains(binderOperation->challenge)) {
         Private::destroyOperation(binderOperation, true);
         return CallResult(true, KmConcurrentAccessConflict,
                           QStringLiteral("KeyMint operation collision"));
@@ -1931,9 +2202,395 @@ KeyMintBinderClient::CallResult KeyMintBinderClient::finishOpenMasterKey(
     return result;
 }
 
+KeyMintBinderClient::CallResult KeyMintBinderClient::oneShot(
+        quint32 operation,
+        const QByteArray &request,
+        QByteArray *response)
+{
+    QMutexLocker locker(&d->mutex);
+    if (!response) {
+        return CallResult(true, KmInvalidArgument);
+    }
+    response->clear();
+    Cursor cursor(request);
+
+    if (operation == CapabilitiesOperation) {
+        if (!cursor.atEnd()) {
+            return CallResult(true, KmInvalidArgument);
+        }
+        qint32 securityLevel = -1;
+        const CallResult result = d->getHardwareInfo(&securityLevel);
+        if (result.succeeded()) {
+            *response = serializeCapabilitiesResponse(securityLevel);
+        }
+        return result;
+    }
+    if (operation == GenerateOperation || operation == ImportOperation) {
+        qint32 format = 0;
+        QByteArray serializedParameters;
+        QByteArray keyData;
+        if ((operation == ImportOperation && !cursor.take(&format))
+                || !cursor.takeBlob(&serializedParameters)
+                || (operation == ImportOperation
+                    && (!cursor.takeBlob(&keyData) || keyData.isEmpty()))
+                || !cursor.atEnd()) {
+            return CallResult(true, KmInvalidArgument);
+        }
+        QVector<Parameter> parameters;
+        if (!parseAuthSet(serializedParameters, &parameters)) {
+            return CallResult(true, KmInvalidArgument);
+        }
+        CallResult result = d->validatePolicy(parameters);
+        if (!result.succeeded()) {
+            return result;
+        }
+        addLegacyCertificateValidity(&parameters);
+        KeyCreation creation;
+        result = operation == GenerateOperation
+                ? d->generateKey(parameters, &creation)
+                : d->importKey(parameters, format, keyData, &creation);
+        if (!result.succeeded()) {
+            return result;
+        }
+        const QByteArray opaque = serializeOpaqueKey(creation.key);
+        const QByteArray characteristics = serializeCharacteristics(
+                    creation.characteristics);
+        if (opaque.isEmpty() || characteristics.isEmpty()) {
+            d->deleteKey(creation.key.rawBlob);
+            return CallResult(false, KmUnknownError,
+                              QStringLiteral("Unable to serialize KeyMint key result"));
+        }
+        appendBlob(response, opaque);
+        appendBlob(response, characteristics);
+        return CallResult(true, KmOk);
+    }
+    if (operation == ImportWrappedOperation) {
+        QByteArray wrapped;
+        QByteArray wrappingOpaque;
+        QByteArray masking;
+        QByteArray serializedParameters;
+        quint64 passwordSid = 0;
+        quint64 biometricSid = 0;
+        OpaqueKey wrappingKey;
+        QVector<Parameter> parameters;
+        if (!cursor.takeBlob(&wrapped) || wrapped.isEmpty()
+                || !cursor.takeBlob(&wrappingOpaque)
+                || !cursor.takeBlob(&masking)
+                || !cursor.takeBlob(&serializedParameters)
+                || !cursor.take(&passwordSid) || !cursor.take(&biometricSid)
+                || !cursor.atEnd()
+                || !parseOpaqueKey(wrappingOpaque, &wrappingKey)
+                || !parseAuthSet(serializedParameters, &parameters)) {
+            return CallResult(true, KmInvalidArgument);
+        }
+        if (!d->activeSecureUserId
+                || d->brokerSecureUserId != d->activeSecureUserId) {
+            return CallResult(true, KmNotConfigured);
+        }
+        if (passwordSid && passwordSid != d->activeSecureUserId) {
+            return CallResult(true, KmInvalidUserId,
+                              QStringLiteral("Wrapped-key password SID is not the Sailfish SID"));
+        }
+        if (biometricSid
+                && biometricSid != d->activeFingerprintAuthenticatorId) {
+            return CallResult(true, KmInvalidUserId,
+                              QStringLiteral("Wrapped-key biometric SID is not active"));
+        }
+        KeyCreation creation;
+        CallResult result = d->importWrappedKey(
+                    wrapped, wrappingKey.rawBlob, masking, parameters,
+                    passwordSid, biometricSid, &creation);
+        if (!result.succeeded()) {
+            return result;
+        }
+        const QByteArray opaque = serializeOpaqueKey(creation.key);
+        const QByteArray characteristics = serializeCharacteristics(
+                    creation.characteristics);
+        if (opaque.isEmpty() || characteristics.isEmpty()) {
+            d->deleteKey(creation.key.rawBlob);
+            return CallResult(false, KmUnknownError,
+                              QStringLiteral("Unable to serialize wrapped key result"));
+        }
+        appendBlob(response, opaque);
+        appendBlob(response, characteristics);
+        return CallResult(true, KmOk);
+    }
+    if (operation == ExportOperation) {
+        quint32 format = 0;
+        QByteArray opaqueData;
+        QByteArray applicationId;
+        QByteArray applicationData;
+        OpaqueKey key;
+        if (!cursor.take(&format) || !cursor.takeBlob(&opaqueData)
+                || !cursor.takeBlob(&applicationId)
+                || !cursor.takeBlob(&applicationData) || !cursor.atEnd()
+                || !parseOpaqueKey(opaqueData, &key)) {
+            return CallResult(true, KmInvalidKeyBlob);
+        }
+        Q_UNUSED(applicationId)
+        Q_UNUSED(applicationData)
+        if (format != 0 || key.publicKey.isEmpty()) {
+            return CallResult(true, KmUnsupportedKeyFormat);
+        }
+        appendBlob(response, key.publicKey);
+        return CallResult(true, KmOk);
+    }
+    if (operation == CharacteristicsOperation) {
+        QByteArray opaqueData;
+        QByteArray applicationId;
+        QByteArray applicationData;
+        OpaqueKey key;
+        if (!cursor.takeBlob(&opaqueData)
+                || !cursor.takeBlob(&applicationId)
+                || !cursor.takeBlob(&applicationData) || !cursor.atEnd()
+                || !parseOpaqueKey(opaqueData, &key)) {
+            return CallResult(true, KmInvalidKeyBlob);
+        }
+        Characteristics characteristics;
+        CallResult result = d->keyCharacteristics(
+                    key.rawBlob, applicationId, applicationData, &characteristics);
+        if (!result.succeeded()) {
+            return result;
+        }
+        *response = serializeCharacteristics(characteristics);
+        return response->isEmpty()
+                ? CallResult(false, KmUnknownError,
+                             QStringLiteral("Unable to serialize key characteristics"))
+                : CallResult(true, KmOk);
+    }
+    if (operation == DeleteOperation) {
+        QByteArray opaqueData;
+        OpaqueKey key;
+        if (!cursor.takeBlob(&opaqueData) || !cursor.atEnd()
+                || !parseOpaqueKey(opaqueData, &key)) {
+            return CallResult(true, KmInvalidKeyBlob);
+        }
+        return d->deleteKey(key.rawBlob);
+    }
+    if (operation == DeleteAllOperation) {
+        // AppSupport deletion is intentionally scoped to records owned by the
+        // calling instance.  Calling KeyMint deleteAllKeys here would also
+        // invalidate the Sailfish Secrets master key.
+        return CallResult(true, KmUnimplemented,
+                          QStringLiteral("Global KeyMint deletion is prohibited"));
+    }
+    if (operation == AddEntropyOperation) {
+        QByteArray entropy;
+        if (!cursor.takeBlob(&entropy) || !cursor.atEnd()) {
+            return CallResult(true, KmInvalidArgument);
+        }
+        return d->addEntropy(entropy);
+    }
+    if (operation == UpgradeOperation) {
+        QByteArray opaqueData;
+        QByteArray serializedParameters;
+        OpaqueKey key;
+        QVector<Parameter> parameters;
+        if (!cursor.takeBlob(&opaqueData)
+                || !cursor.takeBlob(&serializedParameters) || !cursor.atEnd()
+                || !parseOpaqueKey(opaqueData, &key)
+                || !parseAuthSet(serializedParameters, &parameters)) {
+            return CallResult(true, KmInvalidKeyBlob);
+        }
+        QByteArray upgraded;
+        CallResult result = d->upgradeKey(key.rawBlob, parameters, &upgraded);
+        if (!result.succeeded()) {
+            return result;
+        }
+        key.rawBlob = upgraded;
+        const QByteArray upgradedOpaque = serializeOpaqueKey(key);
+        if (upgradedOpaque.isEmpty()) {
+            return CallResult(false, KmUnknownError,
+                              QStringLiteral("Unable to serialize upgraded key"));
+        }
+        appendBlob(response, upgradedOpaque);
+        return CallResult(true, KmOk);
+    }
+    if (operation == AttestOperation) {
+        // A generation-time certificate chain is not an attestation response
+        // for a later request and challenge.  Do not return stale certificates
+        // until the AIDL attestKey transaction is implemented end to end.
+        return CallResult(true, KmUnimplemented,
+                          QStringLiteral("KeyMint attestation is not implemented"));
+    }
+    return CallResult(true, KmUnimplemented);
+}
+
+KeyMintBinderClient::CallResult KeyMintBinderClient::begin(
+        const QByteArray &request,
+        quint64 *operationHandle,
+        QByteArray *response)
+{
+    QMutexLocker locker(&d->mutex);
+    Cursor cursor(request);
+    quint32 purpose = 0;
+    QByteArray opaqueData;
+    QByteArray serializedParameters;
+    OpaqueKey key;
+    QVector<Parameter> parameters;
+    HardwareAuthToken token;
+    if (!operationHandle || !response || !cursor.take(&purpose)
+            || !cursor.takeBlob(&opaqueData)
+            || !cursor.takeBlob(&serializedParameters)
+            || !parseAppHardwareAuthToken(&cursor, &token) || !cursor.atEnd()
+            || !parseOpaqueKey(opaqueData, &key)
+            || !parseAuthSet(serializedParameters, &parameters)) {
+        return CallResult(true, KmInvalidArgument);
+    }
+    CallResult result = d->validateToken(token);
+    if (!result.succeeded()) {
+        return result;
+    }
+    Private::BinderOperation *operation = Q_NULLPTR;
+    QVector<Parameter> outputParameters;
+    result = d->beginOperation(purpose, key.rawBlob, parameters, token,
+                               &operation, &outputParameters);
+    if (!result.succeeded()) {
+        return result;
+    }
+    quint64 handle = operation->challenge;
+    if (!handle) {
+        do {
+            handle = d->nextOperationHandle++;
+            if (!d->nextOperationHandle) {
+                d->nextOperationHandle = 0x8000000000000001ULL;
+            }
+        } while (!handle || d->appOperations.contains(handle)
+                 || d->masterChallenges.contains(handle));
+    }
+    if (d->appOperations.contains(handle)
+            || d->masterChallenges.contains(handle)) {
+        Private::destroyOperation(operation, true);
+        return CallResult(true, KmConcurrentAccessConflict,
+                          QStringLiteral("KeyMint operation handle collision"));
+    }
+    d->appOperations.insert(handle, operation);
+    *operationHandle = handle;
+    *response = serializeAuthSet(outputParameters);
+    if (response->isEmpty()) {
+        d->appOperations.remove(handle);
+        Private::destroyOperation(operation, true);
+        return CallResult(false, KmUnknownError,
+                          QStringLiteral("Unable to serialize begin parameters"));
+    }
+    return CallResult(true, KmOk);
+}
+
+KeyMintBinderClient::CallResult KeyMintBinderClient::update(
+        quint64 operationHandle,
+        const QByteArray &request,
+        QByteArray *response)
+{
+    QMutexLocker locker(&d->mutex);
+    Private::BinderOperation *operation = d->appOperations.value(
+                operationHandle, Q_NULLPTR);
+    if (!operation || !response) {
+        return CallResult(true, KmInvalidOperationHandle);
+    }
+    Cursor cursor(request);
+    QByteArray serializedParameters;
+    QByteArray input;
+    QByteArray serializedVerificationToken;
+    QVector<Parameter> parameters;
+    HardwareAuthToken token;
+    if (!cursor.takeBlob(&serializedParameters) || !cursor.takeBlob(&input)
+            || !parseAppHardwareAuthToken(&cursor, &token)
+            || !cursor.takeBlob(&serializedVerificationToken) || !cursor.atEnd()
+            || !parseAuthSet(serializedParameters, &parameters)
+            || !emptyVerificationToken(serializedVerificationToken)) {
+        return CallResult(true, KmInvalidArgument);
+    }
+    CallResult result = d->validateToken(token, token.present
+                                         ? operation->challenge : 0);
+    if (!result.succeeded()) {
+        return result;
+    }
+    for (const QByteArray &aad : associatedData(parameters)) {
+        result = d->updateAad(operation, aad, token);
+        if (!result.succeeded()) {
+            return result;
+        }
+    }
+    QByteArray output;
+    if (!input.isEmpty()) {
+        result = d->operationCall(operation, UpdateTransaction,
+                                  input, QByteArray(), token,
+                                  QByteArray(), &output);
+    }
+    if (!result.succeeded()) {
+        return result;
+    }
+    response->clear();
+    appendLittleEndian(response, quint32(input.size()));
+    appendBlob(response, serializeAuthSet(QVector<Parameter>()));
+    appendBlob(response, output);
+    return CallResult(true, KmOk);
+}
+
+KeyMintBinderClient::CallResult KeyMintBinderClient::finish(
+        quint64 operationHandle,
+        const QByteArray &request,
+        QByteArray *response)
+{
+    QMutexLocker locker(&d->mutex);
+    Private::BinderOperation *operation = d->appOperations.value(
+                operationHandle, Q_NULLPTR);
+    if (!operation || !response) {
+        return CallResult(true, KmInvalidOperationHandle);
+    }
+    Cursor cursor(request);
+    QByteArray serializedParameters;
+    QByteArray input;
+    QByteArray signature;
+    QByteArray serializedVerificationToken;
+    QVector<Parameter> parameters;
+    HardwareAuthToken token;
+    if (!cursor.takeBlob(&serializedParameters) || !cursor.takeBlob(&input)
+            || !cursor.takeBlob(&signature)
+            || !parseAppHardwareAuthToken(&cursor, &token)
+            || !cursor.takeBlob(&serializedVerificationToken) || !cursor.atEnd()
+            || !parseAuthSet(serializedParameters, &parameters)
+            || !emptyVerificationToken(serializedVerificationToken)) {
+        return CallResult(true, KmInvalidArgument);
+    }
+    CallResult result = d->validateToken(token, token.present
+                                         ? operation->challenge : 0);
+    if (!result.succeeded()) {
+        return result;
+    }
+    for (const QByteArray &aad : associatedData(parameters)) {
+        result = d->updateAad(operation, aad, token);
+        if (!result.succeeded()) {
+            return result;
+        }
+    }
+    QByteArray confirmation = confirmationToken(parameters);
+    if (confirmation.isEmpty()) {
+        confirmation = QByteArray();
+    }
+    QByteArray output;
+    result = d->operationCall(operation, FinishTransaction,
+                              input, signature, token, confirmation, &output);
+    if (!result.succeeded()) {
+        return result;
+    }
+    d->appOperations.remove(operationHandle);
+    Private::destroyOperation(operation, false);
+    response->clear();
+    appendBlob(response, serializeAuthSet(QVector<Parameter>()));
+    appendBlob(response, output);
+    return CallResult(true, KmOk);
+}
+
 KeyMintBinderClient::CallResult KeyMintBinderClient::abort(quint64 operationHandle)
 {
     QMutexLocker locker(&d->mutex);
+    Private::BinderOperation *operation = d->appOperations.take(operationHandle);
+    if (operation) {
+        const CallResult result = d->abortOperation(operation);
+        Private::destroyOperation(operation, false);
+        return result;
+    }
     const QByteArray context = d->masterChallenges.take(operationHandle);
     Private::MasterOperation *master = context.isEmpty()
             ? Q_NULLPTR : d->masterOperations.take(context);
@@ -2001,6 +2658,7 @@ KeyMintBinderClient::CallResult KeyMintBinderClient::setAuthenticationState(
     if (d->brokerSecureUserId != secureUserId
             || d->activeFingerprintAuthenticatorId
                     != fingerprintAuthenticatorId) {
+        d->clearAppOperations(true);
         d->brokerSecureUserId = secureUserId;
         d->activeFingerprintAuthenticatorId = fingerprintAuthenticatorId;
     }
