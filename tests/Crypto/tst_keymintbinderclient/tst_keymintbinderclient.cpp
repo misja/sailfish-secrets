@@ -17,6 +17,10 @@ private slots:
     void authenticationIdentityPolicy();
     void opaqueKeyAndEnvelopeRoundTrip();
     void hardwareAuthTokenParsing();
+    void hidlTokenLayout();
+    void hidlNullChildEncoding();
+    void hidlKeymasterSmoke_data();
+    void hidlKeymasterSmoke();
 };
 
 void tst_keymintbinderclient::authSetRoundTripAndPolicy()
@@ -179,6 +183,171 @@ void tst_keymintbinderclient::hardwareAuthTokenParsing()
                                 reinterpret_cast<const char *>(&zero), sizeof(zero));
     QVERIFY(!parseMasterHardwareAuthToken(zeroTimestampMaster, &parsedMaster));
 
+}
+
+void tst_keymintbinderclient::hidlTokenLayout()
+{
+    HardwareAuthToken token;
+    token.present = true;
+    token.challenge = Q_UINT64_C(0x1020304050607080);
+    token.userId = 123;
+    token.authenticatorId = 456;
+    token.authenticatorType = AuthenticatorPassword;
+    token.timestamp = Q_UINT64_C(0x1122334455667788);
+    const Keymaster4::WireAuthToken wire = Keymaster4::makeAuthToken(token);
+    QCOMPARE(wire.challenge, token.challenge);
+    QCOMPARE(wire.userId, token.userId);
+    QCOMPARE(wire.authenticatorId, token.authenticatorId);
+    QCOMPARE(wire.authenticatorType, token.authenticatorType);
+    QCOMPARE(wire.timestamp, token.timestamp);
+    QCOMPARE(wire.padding, quint32(0));
+    token.present = false;
+    const Keymaster4::WireAuthToken empty = Keymaster4::makeAuthToken(token);
+    QCOMPARE(empty.challenge, quint64(0));
+    QCOMPARE(empty.timestamp, quint64(0));
+    QCOMPARE(empty.mac.count, guint32(0));
+}
+
+void tst_keymintbinderclient::hidlNullChildEncoding()
+{
+    Keymaster4::NullBufferObject object = {};
+    object.type = (quint32('p') << 24) | (quint32('t') << 16) | (quint32('*') << 8) | 0x85;
+    object.flags = 1;
+    object.parent = 3;
+    object.parentOffset = 16;
+    QVERIFY(Keymaster4::isNullChild(&object, sizeof(object), 16));
+    QVERIFY(!Keymaster4::isNullChild(&object, sizeof(object) - 1, 16));
+    QVERIFY(!Keymaster4::isNullChild(&object, sizeof(object), 0));
+    object.length = 1;
+    QVERIFY(!Keymaster4::isNullChild(&object, sizeof(object), 16));
+    object.length = 0;
+    object.buffer = 1;
+    QVERIFY(!Keymaster4::isNullChild(&object, sizeof(object), 16));
+    object.buffer = 0;
+    object.flags = 0;
+    QVERIFY(!Keymaster4::isNullChild(&object, sizeof(object), 16));
+    object.flags = 1;
+    object.type = 0;
+    QVERIFY(!Keymaster4::isNullChild(&object, sizeof(object), 16));
+}
+
+void tst_keymintbinderclient::hidlKeymasterSmoke_data()
+{
+    QTest::addColumn<int>("authenticationType");
+    QTest::newRow("password") << int(AuthenticatorPassword);
+    QTest::newRow("fingerprint") << int(AuthenticatorFingerprint);
+    QTest::newRow("password-or-fingerprint") << int(AuthenticatorPassword | AuthenticatorFingerprint);
+    QTest::newRow("no-auth-scratch-control") << 0;
+}
+
+void tst_keymintbinderclient::hidlKeymasterSmoke()
+{
+    if (qgetenv("SAILFISH_TEST_KEYMASTER4") != "1")
+        QSKIP("Explicit device opt-in required; creates and deletes one scratch key");
+    GBinderServiceManager *manager = gbinder_servicemanager_new("/dev/hwbinder");
+    QVERIFY(manager);
+    GBinderRemoteObject *remote = gbinder_servicemanager_get_service_sync(
+                manager, Keymaster4::Service, Q_NULLPTR);
+    GBinderClient *client = remote ? gbinder_client_new(remote, Keymaster4::Interface) : Q_NULLPTR;
+    if (!client) {
+        gbinder_servicemanager_unref(manager);
+        QFAIL("No HIDL Keymaster 4.0 service");
+    }
+    QFETCH(int, authenticationType);
+    quint64 testSecureId = Q_UINT64_C(0x1020304050607080);
+    const QByteArray handlePath = qgetenv("SAILFISH_TEST_KEYMASTER_SID_HANDLE");
+    if (!handlePath.isEmpty()) {
+        // Optional real-SID control. Read only the public-format version/SID
+        // prefix on the device; never print/export it or read the credential MAC.
+        QFile handleFile(QString::fromLocal8Bit(handlePath));
+        QVERIFY(handleFile.open(QIODevice::ReadOnly));
+        const QByteArray prefix = handleFile.read(9);
+        QVERIFY(handleFile.size() == 58 && prefix.size() == 9 && quint8(prefix[0]) <= 2);
+        memcpy(&testSecureId, prefix.constData() + 1, sizeof(testSecureId));
+        QVERIFY(testSecureId != 0);
+    }
+    QVector<Parameter> params;
+    params << scalarParameter(TagPurpose, PurposeEncrypt)
+           << scalarParameter(TagPurpose, PurposeDecrypt)
+           << scalarParameter(TagAlgorithm, AlgorithmAes)
+           << scalarParameter(TagKeySize, 256)
+           << scalarParameter(TagBlockMode, BlockModeGcm)
+           << scalarParameter(TagPadding, PaddingNone)
+           << scalarParameter(TagMinMacLength, 128);
+    if (authenticationType) {
+        params << scalarParameter(TagUserSecureId, testSecureId)
+               << scalarParameter(TagUserAuthType, authenticationType);
+    } else {
+        // Transport control only: never used for the production master key.
+        params << scalarParameter(TagNoAuthRequired, 1);
+    }
+    KeyCreation creation;
+    const Keymaster4::Result generated = Keymaster4::generate(client, params, &creation);
+    Keymaster4::Result begun, aborted, removed;
+    bool secureIdEnforced = false, authTypeEnforced = false, timeoutPresent = false;
+    for (const Parameter &parameter : creation.characteristics.hardware) {
+        if (parameter.tag == TagUserSecureId)
+            secureIdEnforced |= parameter.scalar == testSecureId;
+        if (parameter.tag == TagUserAuthType)
+            authTypeEnforced |= parameter.scalar == quint64(authenticationType);
+        timeoutPresent |= parameter.tag == TagAuthTimeout;
+    }
+    for (const Parameter &parameter : creation.characteristics.software)
+        timeoutPresent |= parameter.tag == TagAuthTimeout;
+    bool scratchRoundTrip = authenticationType != 0;
+    quint64 handle = 0;
+    QVector<Parameter> out;
+    if (generated.succeeded()) {
+        QVector<Parameter> operationParams;
+        operationParams << scalarParameter(TagBlockMode, BlockModeGcm)
+                        << scalarParameter(TagPadding, PaddingNone)
+                        << scalarParameter(TagMacLength, 128);
+        begun = Keymaster4::begin(client, PurposeEncrypt, creation.key.rawBlob,
+                                  operationParams, HardwareAuthToken(), &handle, &out);
+        if (handle) aborted = Keymaster4::abort(client, handle);
+        if (!authenticationType && begun.succeeded()) {
+            QByteArray nonce, encrypted, decrypted;
+            const QByteArray plaintext(32, '\x42');
+            const auto crypt = [&](qint32 purpose, const QByteArray &input, QByteArray *output) {
+                QVector<Parameter> cryptParams = operationParams;
+                if (purpose == PurposeDecrypt) cryptParams << blobParameter(TagNonce, nonce);
+                QVector<Parameter> returned;
+                quint64 operationHandle = 0;
+                Keymaster4::Result result = Keymaster4::begin(client, purpose, creation.key.rawBlob,
+                            cryptParams, HardwareAuthToken(), &operationHandle, &returned);
+                if (!result.succeeded()) return false;
+                if (purpose == PurposeEncrypt) nonce = nonceFromParameters(returned);
+                QVector<Parameter> aad;
+                aad << blobParameter(TagAssociatedData, QByteArray("scratch-test-aad"));
+                QByteArray ignored;
+                result = Keymaster4::operate(client, operationHandle, false, aad, QByteArray(),
+                                            QByteArray(), HardwareAuthToken(), &ignored);
+                if (!result.succeeded()) {
+                    Keymaster4::abort(client, operationHandle);
+                    return false;
+                }
+                result = Keymaster4::operate(client, operationHandle, true, QVector<Parameter>(),
+                                            input, QByteArray(), HardwareAuthToken(), output);
+                return result.succeeded();
+            };
+            scratchRoundTrip = crypt(PurposeEncrypt, plaintext, &encrypted)
+                    && crypt(PurposeDecrypt, encrypted, &decrypted) && decrypted == plaintext;
+        }
+        removed = Keymaster4::deleteKey(client, creation.key.rawBlob);
+    }
+    gbinder_client_unref(client);
+    gbinder_servicemanager_unref(manager);
+    QVERIFY2(generated.succeeded(), qPrintable(generated.errorMessage));
+    QVERIFY2(removed.succeeded(), qPrintable(removed.errorMessage));
+    if (authenticationType) {
+        QVERIFY(secureIdEnforced);
+        QVERIFY(authTypeEnforced);
+        QVERIFY(!timeoutPresent);
+    }
+    QVERIFY2(begun.succeeded(), qPrintable(begun.errorMessage));
+    QVERIFY2(aborted.succeeded(), qPrintable(aborted.errorMessage));
+    QCOMPARE(nonceFromParameters(out).size(), GcmNonceSize);
+    QVERIFY(scratchRoundTrip);
 }
 
 QTEST_APPLESS_MAIN(tst_keymintbinderclient)

@@ -56,6 +56,7 @@ const QByteArray MasterContextMagic("SFKMCTX1", 8);
 
 const quint32 ProtocolVersion = 1;
 const quint32 BackendVersion = 1;
+const quint32 HidlBackendVersion = 2;
 const quint32 MaximumBlobSize = 1024 * 1024;
 const quint32 MaximumParameters = 1024;
 const quint32 MaximumCertificates = 64;
@@ -837,6 +838,8 @@ QByteArray nonceFromParameters(const QVector<Parameter> &parameters)
     return QByteArray();
 }
 
+#include "keymaster4_p.h"
+
 } // namespace
 
 KeyMintBinderClient::CallResult::CallResult(
@@ -861,9 +864,10 @@ public:
         GBinderRemoteObject *remote;
         GBinderClient *client;
         quint64 challenge;
+        bool hidl;
 
         BinderOperation()
-            : remote(Q_NULLPTR), client(Q_NULLPTR), challenge(0) {}
+            : remote(Q_NULLPTR), client(Q_NULLPTR), challenge(0), hidl(false) {}
     };
 
     struct MasterOperation {
@@ -881,6 +885,8 @@ public:
         : serviceManager(Q_NULLPTR)
         , remote(Q_NULLPTR)
         , client(Q_NULLPTR)
+        , hidlManager(Q_NULLPTR)
+        , hidl(false)
         , activeSecureUserId(0)
         , brokerSecureUserId(0)
         , activeFingerprintAuthenticatorId(0)
@@ -895,6 +901,7 @@ public:
         if (serviceManager) {
             gbinder_servicemanager_unref(serviceManager);
         }
+        if (hidlManager) gbinder_servicemanager_unref(hidlManager);
     }
 
     CallResult ensureClient()
@@ -907,21 +914,23 @@ public:
         if (!serviceManager) {
             serviceManager = gbinder_servicemanager_new(BinderDevice);
         }
-        if (!serviceManager) {
-            return CallResult(false, KmHardwareTypeUnavailable,
-                              QStringLiteral("Unable to open /dev/binder"));
+        GBinderRemoteObject *service = serviceManager
+                ? gbinder_servicemanager_get_service_sync(serviceManager, KeyMintService, Q_NULLPTR)
+                : Q_NULLPTR;
+        hidl = false;
+        if (!service) {
+            if (!hidlManager) hidlManager = gbinder_servicemanager_new("/dev/hwbinder");
+            service = hidlManager ? gbinder_servicemanager_get_service_sync(
+                        hidlManager, Keymaster4::Service, Q_NULLPTR) : Q_NULLPTR;
+            hidl = service != Q_NULLPTR;
         }
-        GBinderRemoteObject *service = gbinder_servicemanager_get_service_sync(
-                    serviceManager, KeyMintService, Q_NULLPTR);
         if (!service) {
             return CallResult(false, KmHardwareTypeUnavailable,
-                              QStringLiteral("AIDL KeyMint service is unavailable"));
+                              QStringLiteral("Neither AIDL KeyMint nor HIDL Keymaster 4.0 is available"));
         }
-        // The synchronous service-manager lookup returns an autoreleased
-        // object.  Keep an independent reference for the lifetime of the
-        // client so clearService() cannot release the manager's reference.
+        // Service-manager results are autoreleased; retain our own reference.
         remote = gbinder_remote_object_ref(service);
-        client = gbinder_client_new(remote, KeyMintInterface);
+        client = gbinder_client_new(remote, hidl ? Keymaster4::Interface : KeyMintInterface);
         if (!client) {
             clearService();
             return CallResult(false, KmHardwareTypeUnavailable,
@@ -947,7 +956,9 @@ public:
         if (!operation) {
             return;
         }
-        if (sendAbort && operation->client) {
+        if (sendAbort && operation->client && operation->hidl) {
+            Keymaster4::abort(operation->client, operation->challenge);
+        } else if (sendAbort && operation->client) {
             GBinderLocalRequest *request = gbinder_client_new_request(operation->client);
             if (request) {
                 int status = 0;
@@ -982,10 +993,10 @@ public:
         delete operation;
     }
 
-    void clearOperations()
+    void clearOperations(bool sendAbort = false)
     {
         for (MasterOperation *operation : masterOperations) {
-            destroyMasterOperation(operation, false);
+            destroyMasterOperation(operation, sendAbort);
         }
         masterOperations.clear();
         masterChallenges.clear();
@@ -1155,6 +1166,7 @@ public:
         if (!ready.succeeded()) {
             return ready;
         }
+        if (hidl) { return Keymaster4::generate(client, parameters, creation); }
         GBinderLocalRequest *request = gbinder_client_new_request(client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1190,6 +1202,7 @@ public:
         if (!ready.succeeded()) {
             return ready;
         }
+        if (hidl) { return CallResult(true, KmUnimplemented); }
         GBinderLocalRequest *request = gbinder_client_new_request(client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1230,6 +1243,7 @@ public:
         if (!ready.succeeded()) {
             return ready;
         }
+        if (hidl) { return CallResult(true, KmUnimplemented); }
         GBinderLocalRequest *request = gbinder_client_new_request(client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1266,6 +1280,7 @@ public:
         if (!ready.succeeded()) {
             return ready;
         }
+        if (hidl) { return CallResult(true, KmUnimplemented); }
         GBinderLocalRequest *request = gbinder_client_new_request(client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1294,6 +1309,7 @@ public:
         if (!ready.succeeded()) {
             return ready;
         }
+        if (hidl) { return Keymaster4::deleteKey(client, rawKeyBlob); }
         GBinderLocalRequest *request = gbinder_client_new_request(client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1324,6 +1340,7 @@ public:
         if (!ready.succeeded()) {
             return ready;
         }
+        if (hidl) { return CallResult(true, KmUnimplemented); }
         GBinderLocalRequest *request = gbinder_client_new_request(client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1358,6 +1375,7 @@ public:
         if (!ready.succeeded()) {
             return ready;
         }
+        if (hidl) { return CallResult(true, KmUnimplemented); }
         GBinderLocalRequest *request = gbinder_client_new_request(client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1394,6 +1412,21 @@ public:
         const CallResult ready = ensureClient();
         if (!ready.succeeded()) {
             return ready;
+        }
+        if (hidl) {
+            quint64 handle = 0;
+            QVector<Parameter> parametersOut;
+            CallResult result = Keymaster4::begin(client, purpose, rawKeyBlob,
+                    parameters, authToken, &handle, &parametersOut);
+            if (result.succeeded()) {
+                BinderOperation *parsed = new BinderOperation;
+                parsed->client = gbinder_client_ref(client);
+                parsed->challenge = handle;
+                parsed->hidl = true;
+                *operation = parsed;
+                if (outputParameters) *outputParameters = parametersOut;
+            }
+            return result;
         }
         GBinderLocalRequest *request = gbinder_client_new_request(client);
         if (!request) {
@@ -1470,6 +1503,14 @@ public:
             return CallResult(true, KmInvalidOperationHandle,
                               QStringLiteral("Unknown KeyMint operation"));
         }
+        if (operation->hidl) {
+            if (!confirmation.isEmpty() || (transaction != FinishTransaction
+                                           && transaction != UpdateTransaction))
+                return CallResult(true, KmUnimplemented);
+            return Keymaster4::operate(operation->client, operation->challenge,
+                    transaction == FinishTransaction, QVector<Parameter>(), input,
+                    signature, authToken, output);
+        }
         GBinderLocalRequest *request = gbinder_client_new_request(operation->client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1516,6 +1557,14 @@ public:
         if (!operation || !operation->client) {
             return CallResult(true, KmInvalidOperationHandle);
         }
+        if (operation->hidl) {
+            QVector<Parameter> parameters;
+            parameters << blobParameter(TagAssociatedData, input);
+            QByteArray output;
+            CallResult result = Keymaster4::operate(operation->client, operation->challenge,
+                    false, parameters, QByteArray(), QByteArray(), authToken, &output);
+            return result.succeeded() && !output.isEmpty() ? Keymaster4::malformed() : result;
+        }
         GBinderLocalRequest *request = gbinder_client_new_request(operation->client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1545,6 +1594,8 @@ public:
         if (!operation || !operation->client) {
             return CallResult(true, KmInvalidOperationHandle);
         }
+        if (operation->hidl)
+            return Keymaster4::abort(operation->client, operation->challenge);
         GBinderLocalRequest *request = gbinder_client_new_request(operation->client);
         if (!request) {
             return CallResult(false, KmUnknownError,
@@ -1591,6 +1642,8 @@ public:
     GBinderServiceManager *serviceManager;
     GBinderRemoteObject *remote;
     GBinderClient *client;
+    GBinderServiceManager *hidlManager;
+    bool hidl;
     quint64 activeSecureUserId;
     quint64 brokerSecureUserId;
     quint64 activeFingerprintAuthenticatorId;
@@ -1699,7 +1752,7 @@ KeyMintBinderClient::CallResult KeyMintBinderClient::beginCreateMasterKey(
     master->envelope.sailfishUserId = sailfishUserId;
     master->envelope.secureUserId = secureUserId;
     master->envelope.identityEpoch = identityEpoch;
-    master->envelope.backendVersion = BackendVersion;
+    master->envelope.backendVersion = d->hidl ? HidlBackendVersion : BackendVersion;
     master->envelope.keyBlob = opaqueKey;
     master->envelope.nonce = nonce;
     master->operation = binderOperation;
@@ -1781,6 +1834,12 @@ KeyMintBinderClient::CallResult KeyMintBinderClient::beginOpenMasterKey(
             || !parseOpaqueKey(envelope.keyBlob, &key)) {
         return CallResult(true, KmInvalidKeyBlob,
                           QStringLiteral("Invalid Secrets master-key envelope"));
+    }
+    const CallResult ready = d->ensureClient();
+    if (!ready.succeeded()) return ready;
+    if (envelope.backendVersion != (d->hidl ? HidlBackendVersion : BackendVersion)) {
+        return CallResult(true, KmInvalidKeyBlob,
+                          QStringLiteral("Master key belongs to a different hardware backend"));
     }
     QVector<Parameter> beginParameters;
     beginParameters << scalarParameter(TagBlockMode, BlockModeGcm)
@@ -1893,6 +1952,15 @@ KeyMintBinderClient::CallResult KeyMintBinderClient::deviceLocked(
     const CallResult ready = d->ensureClient();
     if (!ready.succeeded()) {
         return ready;
+    }
+    if (d->hidl) {
+        // Keymaster 4.0 has no deviceLocked transaction. This native adapter
+        // exposes only PIN-bound, per-operation master keys (no auth timeout
+        // or UNLOCKED_DEVICE_REQUIRED keys). Invalidate every outstanding
+        // operation locally and in the TEE; the Secrets controller separately
+        // discards its unlocked master key when the device locks.
+        d->clearOperations(true);
+        return CallResult(true, KmOk);
     }
     GBinderLocalRequest *request = gbinder_client_new_request(d->client);
     if (!request) {

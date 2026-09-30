@@ -10,6 +10,7 @@ PKGCONFIG += libgbinder libcrypto
 
 HEADERS += \
     $$PWD/keymintbinderclient_p.h \
+    $$PWD/keymaster4_p.h \
     $$PWD/keymintcryptoplugin.h
 
 SOURCES += \
