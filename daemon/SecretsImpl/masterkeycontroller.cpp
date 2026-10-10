@@ -523,7 +523,8 @@ bool MasterKeyController::resumeReset(
 
     if (stage == MasterKeyStore::ResetStarted) {
         QString destroyError;
-        if (!m_appSupport.destroyStoredKeys(&destroyError)) {
+        if (reason != MasterKeyStore::AlphaMigrationReset
+                && !m_appSupport.destroyStoredKeys(&destroyError)) {
             qCWarning(lcSailfishSecretsDaemon) << destroyError;
         }
         lockSession();
@@ -553,6 +554,15 @@ bool MasterKeyController::resumeReset(
         stage = MasterKeyStore::LifecycleAcknowledged;
     }
 
+    if (reason == MasterKeyStore::AlphaMigrationReset
+            && stage >= MasterKeyStore::LifecycleAcknowledged) {
+        if (!m_store.finishReset(errorMessage)) {
+            return false;
+        }
+        updateAppSupportState();
+        return true;
+    }
+
     m_appSupport.setStoreState(false, generation, transactionId);
     if (acknowledgeBroker
             && reason == MasterKeyStore::CredentialRemovalReset
@@ -562,8 +572,7 @@ bool MasterKeyController::resumeReset(
                                      DeviceLockBrokerClient::RemovePending);
     }
     if (stage == MasterKeyStore::AndroidAcknowledged
-            && (reason == MasterKeyStore::AlphaMigrationReset
-                || reason == MasterKeyStore::IdentityInvalidationReset
+            && (reason == MasterKeyStore::IdentityInvalidationReset
                 || (reason == MasterKeyStore::CredentialRemovalReset
                     && (m_removedTransactionId == transactionId
                         // finishReset() first clears the generation's
@@ -610,8 +619,9 @@ void MasterKeyController::updateAppSupportState()
 {
     QString error;
     QByteArray resetTransaction;
+    MasterKeyStore::ResetReason resetReason = MasterKeyStore::CredentialRemovalReset;
     const MasterKeyStore::ResetStage stage = m_store.resetStage(
-                &resetTransaction, &error);
+                &resetTransaction, &error, &resetReason);
     const quint64 generation = m_store.generation(&error);
     if (!error.isEmpty()) {
         qCWarning(lcSailfishSecretsDaemon) << error;
@@ -626,8 +636,12 @@ void MasterKeyController::updateAppSupportState()
                     << "Unable to unlock the AppSupport key store:" << appSupportError;
         }
     }
-    m_appSupport.setStoreState(stateCanBootstrap(), generation,
-                               resetPending ? resetTransaction : QByteArray());
+    // Alpha migration is local to Sailfish Secrets.  Never expose its
+    // transaction as an Android cleanup obligation, including on failure.
+    const QByteArray publishedReset = resetPending
+            && resetReason != MasterKeyStore::AlphaMigrationReset
+            ? resetTransaction : QByteArray();
+    m_appSupport.setStoreState(stateCanBootstrap(), generation, publishedReset);
 }
 
 void MasterKeyController::lockSession()

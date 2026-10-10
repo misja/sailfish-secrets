@@ -280,9 +280,9 @@ bool MasterKeyStore::prepare(QString *errorMessage)
     }
 
     if (marker.isEmpty()) {
-        // Data written before the KeyMint-backed format was alpha data and
-        // has no safe migration path.  Reset only this user's exact Secrets
-        // directory, then durably mark the new format.
+        // Alpha data has no safe migration path.  Reset only this user's
+        // Secrets directory; the controller completes this local migration
+        // without asking Android to destroy its legacy keys.
         QDir oldStore(m_secretsPath);
         if (oldStore.exists() && !oldStore.removeRecursively()) {
             if (errorMessage) {
@@ -563,7 +563,8 @@ bool MasterKeyStore::finishReset(QString *errorMessage)
     if (stage == NoReset) {
         return true;
     }
-    if (stage != AndroidAcknowledged) {
+    if (stage != AndroidAcknowledged && !(reason == AlphaMigrationReset
+                                         && stage == LifecycleAcknowledged)) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Reset has not been acknowledged");
         }

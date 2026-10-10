@@ -28,7 +28,8 @@ private Q_SLOTS:
     void envelopeRejectsMalformedInput();
     void derivationIsSeparatedAndIdentityBound();
     void opaqueReferenceRoundTrip();
-    void alphaResetIsOneShot();
+    void firstActivationCompletesLocalAlphaReset();
+    void alphaResetFinishesWithoutAndroidAcknowledgement();
     void resetTransactionResumesAtEveryStage();
 
 private:
@@ -154,7 +155,7 @@ void tst_masterkey::opaqueReferenceRoundTrip()
     QVERIFY(second.identifier != expected.identifier);
 }
 
-void tst_masterkey::alphaResetIsOneShot()
+void tst_masterkey::firstActivationCompletesLocalAlphaReset()
 {
     QVERIFY(QDir().mkpath(testPath()));
     QFile alphaFile(testPath() + QStringLiteral("/alpha.db"));
@@ -171,9 +172,8 @@ void tst_masterkey::alphaResetIsOneShot()
              MasterKeyStore::GenerationCommitted);
     QCOMPARE(store.generation(&error), quint64(1));
     QVERIFY2(store.acknowledgeReset(&error), qPrintable(error));
-    QVERIFY2(store.acknowledgeAndroidReset(1, migrationTransaction, &error),
-             qPrintable(error));
     QVERIFY2(store.finishReset(&error), qPrintable(error));
+    QCOMPARE(store.resetStage(&migrationTransaction, &error), MasterKeyStore::NoReset);
 
     QFile currentFile(testPath() + QStringLiteral("/current.db"));
     QVERIFY(currentFile.open(QIODevice::WriteOnly));
@@ -182,18 +182,39 @@ void tst_masterkey::alphaResetIsOneShot()
     QVERIFY(QFile::exists(currentFile.fileName()));
 }
 
+void tst_masterkey::alphaResetFinishesWithoutAndroidAcknowledgement()
+{
+    MasterKeyStore store(testPath(), true);
+    QString error;
+    QVERIFY2(store.prepare(&error), qPrintable(error));
+    // Complete the automatically-created first-activation marker before
+    // exercising a later restartable alpha transaction.
+    QVERIFY2(store.acknowledgeReset(&error), qPrintable(error));
+    QVERIFY2(store.finishReset(&error), qPrintable(error));
+    const QByteArray transaction = QByteArray::fromHex(
+                "ffeeddccbbaa99887766554433221100");
+    QVERIFY2(store.beginReset(transaction, &error,
+                              MasterKeyStore::AlphaMigrationReset), qPrintable(error));
+    QVERIFY2(store.deleteForReset(&error), qPrintable(error));
+    quint64 generation = 0;
+    QVERIFY2(store.commitResetGeneration(&generation, &error), qPrintable(error));
+    QVERIFY2(store.acknowledgeReset(&error), qPrintable(error));
+    QByteArray actualTransaction;
+    QCOMPARE(store.resetStage(&actualTransaction, &error), MasterKeyStore::LifecycleAcknowledged);
+    QCOMPARE(actualTransaction, transaction);
+    QVERIFY2(store.finishReset(&error), qPrintable(error));
+    QCOMPARE(store.resetStage(Q_NULLPTR, &error), MasterKeyStore::NoReset);
+}
+
 void tst_masterkey::resetTransactionResumesAtEveryStage()
 {
     MasterKeyStore store(testPath(), true);
     QString error;
     QVERIFY2(store.prepare(&error), qPrintable(error));
-    QByteArray migrationTransaction;
-    QCOMPARE(store.resetStage(&migrationTransaction, &error),
-             MasterKeyStore::GenerationCommitted);
     QVERIFY2(store.acknowledgeReset(&error), qPrintable(error));
-    QVERIFY2(store.acknowledgeAndroidReset(1, migrationTransaction, &error),
-             qPrintable(error));
     QVERIFY2(store.finishReset(&error), qPrintable(error));
+    QByteArray migrationTransaction;
+    QCOMPARE(store.resetStage(&migrationTransaction, &error), MasterKeyStore::NoReset);
     QVERIFY2(store.store(envelope(), &error), qPrintable(error));
 
     const QByteArray transaction = QByteArray::fromHex(
@@ -221,11 +242,25 @@ void tst_masterkey::resetTransactionResumesAtEveryStage()
     QCOMPARE(repeatedGeneration, generation);
     QVERIFY2(resumed.acknowledgeReset(&error), qPrintable(error));
     QCOMPARE(resumed.resetStage(&actualTransaction, &error), MasterKeyStore::LifecycleAcknowledged);
+    QVERIFY(!resumed.finishReset(&error));
+    QVERIFY(!error.isEmpty());
+    error.clear();
     QVERIFY2(resumed.acknowledgeAndroidReset(generation, transaction, &error),
              qPrintable(error));
     QCOMPARE(resumed.resetStage(&actualTransaction, &error), MasterKeyStore::AndroidAcknowledged);
     QVERIFY2(resumed.finishReset(&error), qPrintable(error));
     QCOMPARE(resumed.resetStage(&actualTransaction, &error), MasterKeyStore::NoReset);
+
+    const QByteArray identityTransaction = QByteArray::fromHex(
+                "102132435465768798a9bacbdcedfe0f");
+    QVERIFY2(resumed.beginReset(identityTransaction, &error,
+                                MasterKeyStore::IdentityInvalidationReset),
+             qPrintable(error));
+    QVERIFY2(resumed.deleteForReset(&error), qPrintable(error));
+    QVERIFY2(resumed.commitResetGeneration(&generation, &error), qPrintable(error));
+    QVERIFY2(resumed.acknowledgeReset(&error), qPrintable(error));
+    QVERIFY(!resumed.finishReset(&error));
+    QVERIFY(!error.isEmpty());
 }
 
 QTEST_APPLESS_MAIN(tst_masterkey)
