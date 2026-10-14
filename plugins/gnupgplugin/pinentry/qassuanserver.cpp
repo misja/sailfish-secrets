@@ -70,7 +70,8 @@ PinentryAssuanError _option_handler(assuan_context_t ctx, const char *key, const
     } else if (!strcmp(key, "default-pwmngr")) {
         return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else if (!strcmp(key, "allow-external-password-cache") && !*value) {
-        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_UNKNOWN_OPTION);
+        self->m_externalCacheAllowed = true;
+        return 0;
     } else if (!strcmp(key, "invisible-char")) {
         return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else
@@ -281,6 +282,7 @@ QAssuanServer::QAssuanServer(QObject *parent)
     , m_connected(false)
     , m_ctx(0)
     , m_request_stop(false)
+    , m_externalCacheAllowed(false)
 {
     gpg_error_t rc;
     int filedesc[2];
@@ -376,7 +378,7 @@ Sailfish::Secrets::Result QAssuanServer::requestPassphrase(QByteArray *passphras
     passphrase->clear();
     fromCache = false;
 
-    bool useCache = m_useCache->value(QVariant(true)).toBool();
+    bool useCache = m_externalCacheAllowed && m_useCache->value(QVariant(true)).toBool();
     if (useCache && cacheId.isValid() && prompt.instruction().isEmpty()) {
         Sailfish::Secrets::StoredSecretRequest request;
         qCDebug(lcSailfishPinentry) << "Starting cache request for" << cacheId.name();
