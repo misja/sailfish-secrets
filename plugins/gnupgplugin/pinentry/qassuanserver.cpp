@@ -18,20 +18,25 @@ Q_LOGGING_CATEGORY(lcSailfishPinentry, "org.sailfishos.secrets.gnupg.pinentry", 
 
 const QString QAssuanServer::Temporary = QStringLiteral("Temporary");
 
-// To be removed when upgrading libassuan to a modern version using gpg-error.
-typedef int (*OptionHandler)(assuan_context_t, const char*, const char*);
-typedef int (*CmdHandler)(assuan_context_t, char *);
 
+#if PINENTRY_MODERN_ASSUAN
+gpg_error_t _reset_handler(assuan_context_t ctx, char *line)
+#else
 void _reset_handler(assuan_context_t ctx)
+#endif
 {
     qCDebug(lcSailfishPinentry) << __func__;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
 
     self->cacheId.setName(QString());
     self->prompt = Sailfish::Secrets::InteractionParameters::PromptText();
+#if PINENTRY_MODERN_ASSUAN
+    Q_UNUSED(line);
+    return 0;
+#endif
 }
 
-gpg_error_t _option_handler(assuan_context_t ctx, const char *key, const char *value)
+PinentryAssuanError _option_handler(assuan_context_t ctx, const char *key, const char *value)
 {
     qCDebug(lcSailfishPinentry) << __func__ << key << value;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
@@ -41,9 +46,9 @@ gpg_error_t _option_handler(assuan_context_t ctx, const char *key, const char *v
     } else if (!strcmp(key, "grab") && !*value) {
         return 0; // Silently ignore.
     } else if (!strcmp(key, "debug-wait")) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else if (!strcmp(key, "display")) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else if (!strcmp(key, "ttyname")) {
         return 0; // Silently ignore.
     } else if (!strcmp(key, "ttytype")) {
@@ -53,27 +58,27 @@ gpg_error_t _option_handler(assuan_context_t ctx, const char *key, const char *v
     } else if (!strcmp(key, "lc-messages")) {
         self->m_messages = value;
     } else if (!strcmp(key, "parent-wid")) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else if (!strcmp(key, "touch-file")) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else if (!strcmp(key, "default-ok")) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else if (!strcmp(key, "default-cancel")) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else if (!strcmp(key, "default-prompt")) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else if (!strcmp(key, "default-pwmngr")) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else if (!strcmp(key, "allow-external-password-cache") && !*value) {
         return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_UNKNOWN_OPTION);
     } else if (!strcmp(key, "invisible-char")) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_IMPLEMENTED);
     } else
-        return ASSUAN_Invalid_Option;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_UNKNOWN_OPTION);
     return 0;
 }
 
-gpg_error_t _assuan_cmd_setdesc(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_setdesc(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
@@ -94,7 +99,7 @@ gpg_error_t _assuan_cmd_setdesc(assuan_context_t ctx, char *line)
     return 0;
 }
 
-gpg_error_t _assuan_cmd_setprompt(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_setprompt(assuan_context_t ctx, char *line)
 {
     Q_UNUSED(ctx);
     qCDebug(lcSailfishPinentry) << __func__ << line;
@@ -104,7 +109,7 @@ gpg_error_t _assuan_cmd_setprompt(assuan_context_t ctx, char *line)
     return 0;
 }
 
-gpg_error_t _assuan_cmd_seterror(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_seterror(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
@@ -112,7 +117,7 @@ gpg_error_t _assuan_cmd_seterror(assuan_context_t ctx, char *line)
     return 0;
 }
 
-gpg_error_t _assuan_cmd_setrepeat(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_setrepeat(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
@@ -121,7 +126,7 @@ gpg_error_t _assuan_cmd_setrepeat(assuan_context_t ctx, char *line)
     return 0;
 }
 
-gpg_error_t _assuan_cmd_setok(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_setok(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
@@ -130,7 +135,7 @@ gpg_error_t _assuan_cmd_setok(assuan_context_t ctx, char *line)
     return 0;
 }
 
-gpg_error_t _assuan_cmd_setcancel(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_setcancel(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
@@ -143,7 +148,7 @@ gpg_error_t _assuan_cmd_setcancel(assuan_context_t ctx, char *line)
    to identify a key for caching strategies of its own.  The empty
    string and --clear mean that the key does not have a stable
    identifier.  */
-gpg_error_t _assuan_cmd_setkeyinfo(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_setkeyinfo(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
@@ -152,7 +157,7 @@ gpg_error_t _assuan_cmd_setkeyinfo(assuan_context_t ctx, char *line)
     return 0;
 }
 
-gpg_error_t _assuan_cmd_getpassphrase(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_getpassphrase(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
@@ -161,11 +166,11 @@ gpg_error_t _assuan_cmd_getpassphrase(assuan_context_t ctx, char *line)
     Sailfish::Secrets::Result result = self->requestPassphrase(&passphrase);
     if (result.errorCode() == Sailfish::Secrets::Result::InteractionViewUserCanceledError) {
         qCWarning(lcSailfishPinentry) << "cancelation" << result.errorMessage();
-        return ASSUAN_Canceled;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_CANCELED);
     }
     if (result.code() != Sailfish::Secrets::Result::Succeeded) {
         qCWarning(lcSailfishPinentry) << result.errorMessage();
-        return ASSUAN_General_Error;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_GENERAL);
     }
 
     if (self->cacheId.isValid()) {
@@ -179,20 +184,20 @@ gpg_error_t _assuan_cmd_getpassphrase(assuan_context_t ctx, char *line)
     return rc;
 }
 
-gpg_error_t _assuan_cmd_confirm(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_confirm(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
 
     Sailfish::Secrets::Result result = self->requestConfirmation();
     if (result.errorCode() == Sailfish::Secrets::Result::InteractionViewUserCanceledError) {
-      return ASSUAN_Canceled;
+      return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_CANCELED);
     }
     if (result.code() != Sailfish::Secrets::Result::Succeeded) {
         qCWarning(lcSailfishPinentry) << result.errorMessage();
-        return ASSUAN_General_Error;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_GENERAL);
     }
-    return ASSUAN_No_Error;
+    return 0;
 }
 
 #define PACKAGE_VERSION "0.0.1"
@@ -204,7 +209,7 @@ gpg_error_t _assuan_cmd_confirm(assuan_context_t ctx, char *line)
      version     - Return the version of the program.
      pid         - Return the process id of the server.
  */
-static gpg_error_t _assuan_cmd_getinfo(assuan_context_t ctx, char *line)
+static PinentryAssuanError _assuan_cmd_getinfo(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     int rc = 0;
@@ -217,12 +222,12 @@ static gpg_error_t _assuan_cmd_getinfo(assuan_context_t ctx, char *line)
         snprintf (numbuf, sizeof numbuf, "%lu", (unsigned long)getpid ());
         rc = assuan_send_data(ctx, numbuf, strlen (numbuf));
     } else {
-        rc = ASSUAN_Parameter_Error;
+        rc = gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_INV_VALUE);
     }
     return rc;
 }
 
-gpg_error_t _assuan_cmd_stop(assuan_context_t ctx, char *line)
+PinentryAssuanError _assuan_cmd_stop(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     // assuan_set_flag(ctx, ASSUAN_FORCE_CLOSE, 1);
@@ -238,27 +243,27 @@ static gpg_error_t register_commands(assuan_context_t ctx)
   static struct
   {
     const char *name;
-    int (*handler) (assuan_context_t, char *line);
+    PinentryCommandHandler handler;
   } table[] =
     {
-      { "SETDESC",        (CmdHandler)_assuan_cmd_setdesc },
-      { "SETPROMPT",      (CmdHandler)_assuan_cmd_setprompt },
-      { "SETERROR",       (CmdHandler)_assuan_cmd_seterror },
-      { "SETKEYINFO",     (CmdHandler)_assuan_cmd_setkeyinfo }, // Not yet present in 2.0.4
-      { "SETREPEAT",      (CmdHandler)_assuan_cmd_setrepeat },  // Not yet present in 2.0.4
-      { "SETOK",          (CmdHandler)_assuan_cmd_setok },
-      { "SETCANCEL",      (CmdHandler)_assuan_cmd_setcancel },
-      { "GETPIN",         (CmdHandler)_assuan_cmd_getpassphrase },
-      { "CONFIRM",        (CmdHandler)_assuan_cmd_confirm },
-      { "GETINFO",        (CmdHandler)_assuan_cmd_getinfo },
-      { "STOP",           (CmdHandler)_assuan_cmd_stop },
+      { "SETDESC",        _assuan_cmd_setdesc },
+      { "SETPROMPT",      _assuan_cmd_setprompt },
+      { "SETERROR",       _assuan_cmd_seterror },
+      { "SETKEYINFO",     _assuan_cmd_setkeyinfo }, // Not yet present in 2.0.4
+      { "SETREPEAT",      _assuan_cmd_setrepeat },  // Not yet present in 2.0.4
+      { "SETOK",          _assuan_cmd_setok },
+      { "SETCANCEL",      _assuan_cmd_setcancel },
+      { "GETPIN",         _assuan_cmd_getpassphrase },
+      { "CONFIRM",        _assuan_cmd_confirm },
+      { "GETINFO",        _assuan_cmd_getinfo },
+      { "STOP",           _assuan_cmd_stop },
       { NULL, NULL }
     };
   int i, j;
   gpg_error_t rc;
 
   for (i = j = 0; table[i].name; i++) {
-      rc = assuan_register_command(ctx, table[i].name, table[i].handler);
+      rc = pinentryAssuanRegister(ctx, table[i].name, table[i].handler);
       if (rc)
           return rc;
   }
@@ -270,6 +275,7 @@ QAssuanServer::QAssuanServer(QObject *parent)
     , secretManager()
     , m_useCache(new MDConfItem("/desktop/sailfish/secrets/storeGnuPGPassphrases", this))
     , m_connected(false)
+    , m_ctx(0)
     , m_request_stop(false)
 {
     gpg_error_t rc;
@@ -277,35 +283,40 @@ QAssuanServer::QAssuanServer(QObject *parent)
 
     filedesc[0] = 0;
     filedesc[1] = 1;
-    rc = assuan_init_pipe_server(&m_ctx, filedesc);
+    rc = pinentryAssuanInit(&m_ctx, filedesc);
     if (rc) {
         qCWarning(lcSailfishPinentry) << "failed to initialize the server: " << gpg_strerror(rc);
+        pinentryAssuanRelease(m_ctx);
+        m_ctx = 0;
         return;
     }
-    m_connected = true;
     rc = register_commands(m_ctx);
     if (rc) {
         qCWarning(lcSailfishPinentry) << "failed to the register commands with Assuan: " << gpg_strerror(rc);
-        assuan_deinit_server(m_ctx);
+        pinentryAssuanRelease(m_ctx);
+        m_ctx = 0;
         return;
     }
 
     assuan_set_pointer(m_ctx, this);
-    rc = assuan_register_option_handler(m_ctx, (OptionHandler)_option_handler);
+    rc = assuan_register_option_handler(m_ctx, _option_handler);
     if (rc) {
         qCWarning(lcSailfishPinentry) << "failed to the register option handler with Assuan: " << gpg_strerror(rc);
-        assuan_deinit_server(m_ctx);
+        pinentryAssuanRelease(m_ctx);
+        m_ctx = 0;
         return;
     }
     rc = assuan_register_reset_notify(m_ctx, _reset_handler);
     if (rc) {
         qCWarning(lcSailfishPinentry) << "failed to the register reset handler with Assuan: " << gpg_strerror(rc);
-        assuan_deinit_server(m_ctx);
+        pinentryAssuanRelease(m_ctx);
+        m_ctx = 0;
         return;
     }
 
     cacheId.setCollectionName(QStringLiteral("GnuPG"));
     cacheId.setStoragePluginName(Sailfish::Secrets::SecretManager::DefaultEncryptedStoragePluginName);
+    m_connected = true;
 }
 
 QAssuanServer::~QAssuanServer()
@@ -314,36 +325,38 @@ QAssuanServer::~QAssuanServer()
         terminate();
         wait(500);
     }
-    if (m_connected) {
-        assuan_deinit_server(m_ctx);
+    if (m_ctx) {
+        pinentryAssuanRelease(m_ctx);
+        m_ctx = 0;
     }
 }
 
-void QAssuanServer::start()
+bool QAssuanServer::start()
 {
     if (!m_connected) {
-        return;
+        return false;
     }
 
     QThread::start();
+    return true;
 }
 
 void QAssuanServer::run()
 {
-    assuan_error_t rc;
+    PinentryAssuanError rc;
 
     for (;;) {
         rc = assuan_accept(m_ctx);
-        if (rc == -1)
+        if (rc == static_cast<PinentryAssuanError>(-1))
             break;
         else if (rc) {
-            qCWarning(lcSailfishPinentry) << "Assuan accept failed: " << assuan_strerror(rc);
+            qCWarning(lcSailfishPinentry) << "Assuan accept failed: " << pinentryAssuanStrerror(rc);
             break;
         }
 
         rc = assuan_process(m_ctx);
         if (rc) {
-            qCWarning(lcSailfishPinentry) << "Assuan processing failed: " << assuan_strerror(rc);
+            qCWarning(lcSailfishPinentry) << "Assuan processing failed: " << pinentryAssuanStrerror(rc);
             continue;
         }
 

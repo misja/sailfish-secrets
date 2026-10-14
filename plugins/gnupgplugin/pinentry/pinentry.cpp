@@ -27,7 +27,7 @@ int main(int argc, char **argv)
     QAssuanServer server;
 
     pin.connect(&server, &QAssuanServer::finished, &pin, &Pinentry::onStop);
-    server.start();
+    if (!server.start()) return 1;
 
     return pin.exec();
 }

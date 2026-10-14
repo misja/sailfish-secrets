@@ -12,8 +12,7 @@
 #include <QMutex>
 #include <QDebug>
 
-#include <assuan.h>
-#include <gpg-error.h>
+#include "assuancompat.h"
 
 #include <Secrets/secretmanager.h>
 #include <Secrets/secret.h>
@@ -30,23 +29,27 @@ class QAssuanServer: public QThread
     QAssuanServer(QObject *parent = 0);
     ~QAssuanServer();
 
-    void start();
+    bool start();
 
  private:
     static const QString Temporary;
 
-    friend gpg_error_t _assuan_cmd_confirm(assuan_context_t, char *);
-    friend gpg_error_t _assuan_cmd_getpassphrase(assuan_context_t, char *);
-    friend gpg_error_t _assuan_cmd_setdesc(assuan_context_t, char *);
-    friend gpg_error_t _assuan_cmd_setkeyinfo(assuan_context_t, char *);
-    friend gpg_error_t _assuan_cmd_setprompt(assuan_context_t, char *);
-    friend gpg_error_t _assuan_cmd_seterror(assuan_context_t, char *);
-    friend gpg_error_t _assuan_cmd_setrepeat(assuan_context_t, char *);
-    friend gpg_error_t _assuan_cmd_setok(assuan_context_t, char *);
-    friend gpg_error_t _assuan_cmd_setcancel(assuan_context_t, char *);
-    friend gpg_error_t _assuan_cmd_stop(assuan_context_t, char *);
-    friend gpg_error_t _option_handler(assuan_context_t, const char *, const char *);
+    friend PinentryAssuanError _assuan_cmd_confirm(assuan_context_t, char *);
+    friend PinentryAssuanError _assuan_cmd_getpassphrase(assuan_context_t, char *);
+    friend PinentryAssuanError _assuan_cmd_setdesc(assuan_context_t, char *);
+    friend PinentryAssuanError _assuan_cmd_setkeyinfo(assuan_context_t, char *);
+    friend PinentryAssuanError _assuan_cmd_setprompt(assuan_context_t, char *);
+    friend PinentryAssuanError _assuan_cmd_seterror(assuan_context_t, char *);
+    friend PinentryAssuanError _assuan_cmd_setrepeat(assuan_context_t, char *);
+    friend PinentryAssuanError _assuan_cmd_setok(assuan_context_t, char *);
+    friend PinentryAssuanError _assuan_cmd_setcancel(assuan_context_t, char *);
+    friend PinentryAssuanError _assuan_cmd_stop(assuan_context_t, char *);
+    friend PinentryAssuanError _option_handler(assuan_context_t, const char *, const char *);
+#if PINENTRY_MODERN_ASSUAN
+    friend gpg_error_t _reset_handler(assuan_context_t, char *);
+#else
     friend void _reset_handler(assuan_context_t);
+#endif
 
     Sailfish::Secrets::SecretManager secretManager;
     Sailfish::Secrets::Secret::Identifier cacheId;

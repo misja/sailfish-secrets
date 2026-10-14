@@ -7,7 +7,7 @@ PKGCONFIG += gpg-error mlite5
 LIBS += -lassuan
 include($$PWD/../../../lib/libsailfishsecrets.pri)
 
-HEADERS += qassuanserver.h
+HEADERS += qassuanserver.h assuancompat.h
 SOURCES += qassuanserver.cpp pinentry.cpp
 
 target.path = $$INSTALL_ROOT/usr/bin
