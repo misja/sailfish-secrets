@@ -67,7 +67,7 @@ class QAssuanServer: public QThread
 
     bool ensureCacheCollection();
     Sailfish::Secrets::Result requestConfirmation();
-    Sailfish::Secrets::Result requestPassphrase(QByteArray *passphrase);
+    Sailfish::Secrets::Result requestPassphrase(QByteArray *passphrase, bool &fromCache);
 };
 
 #endif

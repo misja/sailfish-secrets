@@ -163,7 +163,8 @@ PinentryAssuanError _assuan_cmd_getpassphrase(assuan_context_t ctx, char *line)
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
 
     QByteArray passphrase;
-    Sailfish::Secrets::Result result = self->requestPassphrase(&passphrase);
+    bool fromCache = false;
+    Sailfish::Secrets::Result result = self->requestPassphrase(&passphrase, fromCache);
     if (result.errorCode() == Sailfish::Secrets::Result::InteractionViewUserCanceledError) {
         qCWarning(lcSailfishPinentry) << "cancelation" << result.errorMessage();
         return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_CANCELED);
@@ -173,10 +174,13 @@ PinentryAssuanError _assuan_cmd_getpassphrase(assuan_context_t ctx, char *line)
         return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_GENERAL);
     }
 
-    if (self->cacheId.isValid()) {
-        assuan_write_status(self->m_ctx, "PASSWORD_FROM_CACHE", "");
+    gpg_error_t rc = 0;
+    if (fromCache) {
+        rc = assuan_write_status(self->m_ctx, "PASSWORD_FROM_CACHE", "");
     }
-    gpg_error_t rc = assuan_send_data(self->m_ctx, passphrase.constData(), passphrase.length());
+    if (!rc) {
+        rc = assuan_send_data(self->m_ctx, passphrase.constData(), passphrase.length());
+    }
     if (!rc) {
         rc = assuan_send_data(self->m_ctx, NULL, 0);
     }
@@ -367,9 +371,10 @@ void QAssuanServer::run()
     qCDebug(lcSailfishPinentry) << "Assuan loop finished.";
 }
 
-Sailfish::Secrets::Result QAssuanServer::requestPassphrase(QByteArray *passphrase)
+Sailfish::Secrets::Result QAssuanServer::requestPassphrase(QByteArray *passphrase, bool &fromCache)
 {
     passphrase->clear();
+    fromCache = false;
 
     bool useCache = m_useCache->value(QVariant(true)).toBool();
     if (useCache && cacheId.isValid() && prompt.instruction().isEmpty()) {
@@ -385,6 +390,7 @@ Sailfish::Secrets::Result QAssuanServer::requestPassphrase(QByteArray *passphras
         if (request.result().code() == Sailfish::Secrets::Result::Succeeded) {
             qCDebug(lcSailfishPinentry) << "found cached secret";
             *passphrase = request.secret().data();
+            fromCache = true;
             return request.result();
         } else if (request.result().code() == Sailfish::Secrets::Result::Failed
                    && request.result().errorCode() == Sailfish::Secrets::Result::InteractionViewUserCanceledError) {
