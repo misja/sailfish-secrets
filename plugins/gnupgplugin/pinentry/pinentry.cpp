@@ -6,6 +6,7 @@
  */
 
 #include <QCoreApplication>
+#include <unistd.h>
 #include "qassuanserver.h"
 
 class Pinentry : public QCoreApplication
@@ -23,11 +24,12 @@ public slots:
 
 int main(int argc, char **argv)
 {
+    alarm(120); // Bound the UI-only synthetic helper lifetime, including stalled IPC.
     Pinentry pin(argc, argv);
     QAssuanServer server;
 
     pin.connect(&server, &QAssuanServer::finished, &pin, &Pinentry::onStop);
-    server.start();
+    if (!server.start()) return 1;
 
     return pin.exec();
 }

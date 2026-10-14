@@ -20,7 +20,6 @@
 #include <Secrets/result.h>
 #include <Secrets/interactionparameters.h>
 
-#include <MDConfItem>
 
 class QAssuanServer: public QThread
 {
@@ -30,7 +29,7 @@ class QAssuanServer: public QThread
     QAssuanServer(QObject *parent = 0);
     ~QAssuanServer();
 
-    void start();
+    bool start();
 
  private:
     static const QString Temporary;
@@ -46,12 +45,10 @@ class QAssuanServer: public QThread
     friend gpg_error_t _assuan_cmd_setcancel(assuan_context_t, char *);
     friend gpg_error_t _assuan_cmd_stop(assuan_context_t, char *);
     friend gpg_error_t _option_handler(assuan_context_t, const char *, const char *);
-    friend void _reset_handler(assuan_context_t);
+    friend gpg_error_t _reset_handler(assuan_context_t, char *);
 
     Sailfish::Secrets::SecretManager secretManager;
-    Sailfish::Secrets::Secret::Identifier cacheId;
     Sailfish::Secrets::InteractionParameters::PromptText prompt;
-    MDConfItem *m_useCache;
 
     bool m_connected;
     assuan_context_t m_ctx;
@@ -62,7 +59,6 @@ class QAssuanServer: public QThread
 
     void run();
 
-    bool ensureCacheCollection();
     Sailfish::Secrets::Result requestConfirmation();
     Sailfish::Secrets::Result requestPassphrase(QByteArray *passphrase);
 };

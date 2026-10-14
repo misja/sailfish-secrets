@@ -1,14 +1,11 @@
-TEMPLATE=app
-TARGET=pinentry
-QT-=gui
-CONFIG += link_pkgconfig
-PKGCONFIG += gpg-error mlite5
-
-LIBS += -lassuan
-include($$PWD/../../../lib/libsailfishsecrets.pri)
-
+TEMPLATE = app
+TARGET = pinentry
+QT -= gui
+QT += core dbus
+CONFIG += link_pkgconfig c++11
+PKGCONFIG += sailfishsecrets
+INCLUDEPATH += /usr/include/Sailfish /home/ubuntu/gnupg-runtime/build/libassuan-3.0.2-build/src /home/ubuntu/gnupg-runtime/build/libgpg-error-1.61-build/src
+LIBS += /home/ubuntu/gnupg-runtime/build/stage/usr/libexec/sailfish-gnupg/lib/libassuan.so.9 /home/ubuntu/gnupg-runtime/build/stage/usr/libexec/sailfish-gnupg/lib/libgpg-error.so.0
+QMAKE_LFLAGS += -Wl,-rpath,/usr/libexec/sailfish-gnupg/lib
 HEADERS += qassuanserver.h
 SOURCES += qassuanserver.cpp pinentry.cpp
-
-target.path = $$INSTALL_ROOT/usr/bin
-INSTALLS += target
