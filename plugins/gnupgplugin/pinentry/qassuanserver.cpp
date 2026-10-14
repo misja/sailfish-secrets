@@ -37,7 +37,7 @@ gpg_error_t _option_handler(assuan_context_t ctx, const char *key, const char *v
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
 
     if (!strcmp(key, "no-grab") && !*value) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_NOT_SUPPORTED);
     } else if (!strcmp(key, "grab") && !*value) {
         return 0; // Silently ignore.
     } else if (!strcmp(key, "debug-wait")) {
@@ -65,7 +65,7 @@ gpg_error_t _option_handler(assuan_context_t ctx, const char *key, const char *v
     } else if (!strcmp(key, "default-pwmngr")) {
         return ASSUAN_Not_Implemented;
     } else if (!strcmp(key, "allow-external-password-cache") && !*value) {
-        return ASSUAN_Not_Implemented;
+        return gpg_err_make(GPG_ERR_SOURCE_PINENTRY, GPG_ERR_UNKNOWN_OPTION);
     } else if (!strcmp(key, "invisible-char")) {
         return ASSUAN_Not_Implemented;
     } else
