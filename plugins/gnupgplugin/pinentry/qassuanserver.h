@@ -60,6 +60,7 @@ class QAssuanServer: public QThread
     assuan_context_t m_ctx;
     bool m_request_stop;
     bool m_externalCacheAllowed;
+    bool m_keyInfoSet;
 
     QString m_ctype;
     QString m_messages;

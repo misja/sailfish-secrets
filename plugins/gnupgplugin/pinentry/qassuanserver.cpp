@@ -29,6 +29,7 @@ void _reset_handler(assuan_context_t ctx)
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
 
     self->cacheId.setName(QString());
+    self->m_keyInfoSet = false;
     self->prompt = Sailfish::Secrets::InteractionParameters::PromptText();
 #if PINENTRY_MODERN_ASSUAN
     Q_UNUSED(line);
@@ -85,11 +86,12 @@ PinentryAssuanError _assuan_cmd_setdesc(assuan_context_t ctx, char *line)
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
     self->prompt.setMessage(QByteArray::fromPercentEncoding(line).simplified());
 
-    // Ugly hack here due to GnuPG being stuck in 2.0.4
-    // and not having SETKEYINFO command yet. Description looks like:
+    // Legacy agents without SETKEYINFO expose the key ID in the description.
+    // An explicit identifier (including --clear) must take precedence.
+    // Description looks like:
     // "user: "John Dow <john.dow@example.org>""
     // "2048-bit RSA key, ID A099539B, created 2018-04-13 (main key ID 41123AA4)"
-    {
+    if (!self->m_keyInfoSet) {
         const QString &str(self->prompt.message());
         int id = str.lastIndexOf(", ID ");
         if (id > 0) {
@@ -153,6 +155,7 @@ PinentryAssuanError _assuan_cmd_setkeyinfo(assuan_context_t ctx, char *line)
 {
     qCDebug(lcSailfishPinentry) << __func__ << line;
     QAssuanServer *self = static_cast<QAssuanServer*>(assuan_get_pointer(ctx));
+    self->m_keyInfoSet = true;
     self->cacheId.setName((*line && strcmp(line, "--clear") !=0) ? line : QString());
 
     return 0;
@@ -283,6 +286,7 @@ QAssuanServer::QAssuanServer(QObject *parent)
     , m_ctx(0)
     , m_request_stop(false)
     , m_externalCacheAllowed(false)
+    , m_keyInfoSet(false)
 {
     gpg_error_t rc;
     int filedesc[2];
